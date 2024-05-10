@@ -97,12 +97,7 @@ async def send_server_init(
 
     public_key = private_key.public_key()
 
-    public_numbers = public_key.public_numbers()
-
-    generic_key = securemessage_pb2.GenericPublicKey()
-    generic_key.type = securemessage_pb2.EC_P256
-    generic_key.ec_p256_public_key.x = to_twos_complement(public_numbers.x)
-    generic_key.ec_p256_public_key.y = to_twos_complement(public_numbers.y)
+    generic_key = encode_public_key(public_key)
 
     server_init.public_key = generic_key.SerializeToString()
 
@@ -156,66 +151,47 @@ async def parse_client_finished(
     public_key = securemessage_pb2.GenericPublicKey()
     public_key.ParseFromString(client_finished.public_key)
 
-    if public_key.type != securemessage_pb2.EC_P256:
-        return writer.close()
-
-    public_numbers = ec.EllipticCurvePublicNumbers(
-        from_twos_complement(public_key.ec_p256_public_key.x),
-        from_twos_complement(public_key.ec_p256_public_key.y),
-        ec.SECP256R1(),
-    )
-
-    key = public_numbers.public_key()  # this also verifies that (x|y) is on the curve
+    key = decode_public_key(public_key)
 
     logger.debug("Accepted CLIENT_FINISH")
 
     return key
 
 
-async def do_key_exchange(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-) -> Keychain | None:
-    ukey_message = ukey_pb2.Ukey2Message()
+def encode_public_key(
+    public_key: ec.EllipticCurvePublicKey,
+) -> securemessage_pb2.GenericPublicKey:
+    public_numbers = public_key.public_numbers()
 
-    (length,) = struct.unpack(">I", await reader.readexactly(4))
+    generic_key = securemessage_pb2.GenericPublicKey()
+    generic_key.type = securemessage_pb2.EC_P256
+    generic_key.ec_p256_public_key.x = to_twos_complement(public_numbers.x)
+    generic_key.ec_p256_public_key.y = to_twos_complement(public_numbers.y)
 
-    m1 = await reader.readexactly(length)
+    return generic_key
 
-    ukey_message.ParseFromString(m1)
 
-    if ukey_message.message_type != ukey_pb2.Ukey2Message.CLIENT_INIT:
-        return await ukey_alert(
-            alert_type=ukey_pb2.Ukey2Alert.BAD_MESSAGE_TYPE,
-            alert_message="Expected CLIENT_INIT",
-            writer=writer,
-        )
+def decode_public_key(
+    generic_key: securemessage_pb2.GenericPublicKey,
+) -> ec.EllipticCurvePublicKey:
+    if generic_key.type != securemessage_pb2.EC_P256:
+        raise ValueError("Expected EC_P256")
 
-    ukey_client_init = ukey_pb2.Ukey2ClientInit()
-
-    ukey_client_init.ParseFromString(ukey_message.message_data)
-
-    maybe_result = await parse_client_init(ukey_client_init, writer)
-
-    if not maybe_result:
-        return
-
-    _next_protocol, cipher_commitment = maybe_result
-
-    # TODO: Support CURVE25519 when requsted
-    private_key = ec.generate_private_key(ec.SECP256R1())
-
-    m2 = await send_server_init(private_key, cipher_commitment, writer)
-
-    (length,) = struct.unpack(">I", await reader.readexactly(4))
-
-    peer_public_key = await parse_client_finished(
-        await reader.readexactly(length), cipher_commitment, writer
+    public_numbers = ec.EllipticCurvePublicNumbers(
+        from_twos_complement(generic_key.ec_p256_public_key.x),
+        from_twos_complement(generic_key.ec_p256_public_key.y),
+        ec.SECP256R1(),
     )
 
-    if not peer_public_key:
-        # parse_client_finished() rejected the CLIENT_FINISH message
-        return
+    return public_numbers.public_key()
 
+
+def derive_keys(
+    m1: bytes,
+    m2: bytes,
+    private_key: ec.EllipticCurvePrivateKey,
+    peer_public_key: ec.EllipticCurvePublicKey,
+) -> Keychain:
     dhs = hashlib.sha256(private_key.exchange(ec.ECDH(), peer_public_key)).digest()
 
     next_secret = HKDF(
@@ -276,6 +252,122 @@ async def do_key_exchange(
         encrypt_key=encrypt_key,
         send_hmac_key=send_hmac_key,
     )
+
+
+def swap_keychain(keychain: Keychain) -> Keychain:
+    # changes the perspective of the keychain
+    return Keychain(
+        decrypt_key=keychain.encrypt_key,
+        receive_hmac_key=keychain.send_hmac_key,
+        encrypt_key=keychain.decrypt_key,
+        send_hmac_key=keychain.receive_hmac_key,
+    )
+
+
+async def do_server_key_exchange(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> Keychain | None:
+    ukey_message = ukey_pb2.Ukey2Message()
+
+    (length,) = struct.unpack(">I", await reader.readexactly(4))
+
+    m1 = await reader.readexactly(length)
+
+    ukey_message.ParseFromString(m1)
+
+    if ukey_message.message_type != ukey_pb2.Ukey2Message.CLIENT_INIT:
+        return await ukey_alert(
+            alert_type=ukey_pb2.Ukey2Alert.BAD_MESSAGE_TYPE,
+            alert_message="Expected CLIENT_INIT",
+            writer=writer,
+        )
+
+    ukey_client_init = ukey_pb2.Ukey2ClientInit()
+
+    ukey_client_init.ParseFromString(ukey_message.message_data)
+
+    maybe_result = await parse_client_init(ukey_client_init, writer)
+
+    if not maybe_result:
+        return
+
+    _next_protocol, cipher_commitment = maybe_result
+
+    # TODO: Support CURVE25519 when requsted
+    private_key = ec.generate_private_key(ec.SECP256R1())
+
+    m2 = await send_server_init(private_key, cipher_commitment, writer)
+
+    (length,) = struct.unpack(">I", await reader.readexactly(4))
+
+    peer_public_key = await parse_client_finished(
+        await reader.readexactly(length), cipher_commitment, writer
+    )
+
+    if not peer_public_key:
+        # parse_client_finished() rejected the CLIENT_FINISH message
+        return
+
+    return derive_keys(m1, m2, private_key, peer_public_key)
+
+
+async def do_client_key_exchange(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> Keychain | None:
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    public_key = private_key.public_key()
+
+    ukey_client_finished = ukey_pb2.Ukey2ClientFinished()
+    ukey_client_finished.public_key = encode_public_key(public_key).SerializeToString()
+
+    ukey_client_finished_framing = ukey_pb2.Ukey2Message()
+    ukey_client_finished_framing.message_type = ukey_pb2.Ukey2Message.CLIENT_FINISH
+    ukey_client_finished_framing.message_data = ukey_client_finished.SerializeToString()
+
+    serialized_ukey_client_finished_framed = (
+        ukey_client_finished_framing.SerializeToString()
+    )
+
+    ukey_client_init = ukey_pb2.Ukey2ClientInit()
+    ukey_client_init.version = 1
+    ukey_client_init.random = os.urandom(32)
+    ukey_client_init.next_protocol = "AES_256_CBC-HMAC_SHA256"
+    ukey_client_init.cipher_commitments.append(
+        ukey_pb2.Ukey2ClientInit.CipherCommitment(
+            handshake_cipher=ukey_pb2.P256_SHA512,
+            commitment=hashlib.sha512(serialized_ukey_client_finished_framed).digest(),
+        )
+    )
+    ukey_client_init.next_protocol = "AES_256_CBC-HMAC_SHA256"  # FIXME: hardcoded
+
+    message_framing = ukey_pb2.Ukey2Message()
+    message_framing.message_type = ukey_pb2.Ukey2Message.CLIENT_INIT
+    message_framing.message_data = ukey_client_init.SerializeToString()
+
+    m1 = message_framing.SerializeToString()
+    writer.write(struct.pack(">I", len(m1)))
+    writer.write(m1)
+    await writer.drain()
+
+    # SERVER_INIT
+    (length,) = struct.unpack(">I", await reader.readexactly(4))
+    m2 = await reader.readexactly(length)
+
+    message_framing = ukey_pb2.Ukey2Message()
+    message_framing.ParseFromString(m2)
+
+    server_init = ukey_pb2.Ukey2ServerInit()
+    server_init.ParseFromString(message_framing.message_data)
+
+    generic_key = securemessage_pb2.GenericPublicKey()
+    generic_key.ParseFromString(server_init.public_key)
+
+    peer_public_key = decode_public_key(generic_key)
+
+    writer.write(struct.pack(">I", len(serialized_ukey_client_finished_framed)))
+    writer.write(serialized_ukey_client_finished_framed)
+
+    return swap_keychain(derive_keys(m1, m2, private_key, peer_public_key))
 
 
 async def ukey_alert(

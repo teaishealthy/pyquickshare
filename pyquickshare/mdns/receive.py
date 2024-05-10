@@ -1,4 +1,6 @@
 # the mDNS part of QuickShare
+from __future__ import annotations
+
 import asyncio
 import random
 import socket
@@ -7,7 +9,7 @@ from logging import getLogger
 from zeroconf import IPVersion
 from zeroconf.asyncio import AsyncServiceInfo, AsyncZeroconf
 
-from .common import VERSION, Type, to_url64
+from ..common import VERSION, Type, to_url64
 
 logger = getLogger(__name__)
 

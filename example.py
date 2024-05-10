@@ -7,7 +7,7 @@ basicConfig(level=DEBUG)
 
 
 async def main():
-    await pyquickshare.receive_entrypoint()
+    await pyquickshare.send_entrypoint()
 
 
 if __name__ == "__main__":

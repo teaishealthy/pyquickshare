@@ -1,9 +1,16 @@
 import base64
 from enum import Enum
+from typing import TypeVar
+
+T = TypeVar("T")
 
 
 def to_url64(data: bytes | bytearray) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def from_url64(data: str) -> bytes:
+    return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
 
 
 class Type(Enum):
