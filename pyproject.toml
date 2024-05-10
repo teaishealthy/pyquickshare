@@ -3,7 +3,7 @@ name = "pyquickshare"
 version = "0.1.0"
 description = ""
 authors = ["teaishealthy <teaishealthy@protonmail.com>"]
-license = "ISC"
+license = "MIT"
 readme = "README.md"
 
 [tool.poetry.dependencies]
