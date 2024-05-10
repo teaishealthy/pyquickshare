@@ -9,6 +9,8 @@ readme = "README.md"
 [tool.poetry.dependencies]
 python = "^3.10"
 zeroconf = "^0.132.2"
+protobuf = "^5.26.1"
+cryptography = "^42.0.7"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.4.3"
