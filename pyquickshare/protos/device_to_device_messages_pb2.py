@@ -11,7 +11,7 @@ from google.protobuf import symbol_database as _symbol_database
 _sym_db = _symbol_database.Default()
 
 
-from . import securemessage__pb2 as securemessage__pb2
+from . import securemessage_pb2 as securemessage_pb2
 
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1f\x64\x65vice_to_device_messages.proto\x12\tsecuregcm\x1a\x13securemessage.proto\"A\n\x15\x44\x65viceToDeviceMessage\x12\x0f\n\x07message\x18\x01 \x01(\x0c\x12\x17\n\x0fsequence_number\x18\x02 \x01(\x05\"e\n\x0eInitiatorHello\x12\x36\n\rpublic_dh_key\x18\x01 \x01(\x0b\x32\x1f.securemessage.GenericPublicKey\x12\x1b\n\x10protocol_version\x18\x02 \x01(\x05:\x01\x30\"e\n\x0eResponderHello\x12\x36\n\rpublic_dh_key\x18\x01 \x01(\x0b\x32\x1f.securemessage.GenericPublicKey\x12\x1b\n\x10protocol_version\x18\x02 \x01(\x05:\x01\x30\"@\n\x07\x45\x63Point\x12\x1f\n\x05\x63urve\x18\x01 \x02(\x0e\x32\x10.securegcm.Curve\x12\t\n\x01x\x18\x02 \x02(\x0c\x12\t\n\x01y\x18\x03 \x02(\x0c\"w\n\x15SpakeHandshakeMessage\x12\x13\n\x0b\x66low_number\x18\x01 \x01(\x05\x12$\n\x08\x65\x63_point\x18\x02 \x01(\x0b\x32\x12.securegcm.EcPoint\x12\x12\n\nhash_value\x18\x03 \x01(\x0c\x12\x0f\n\x07payload\x18\x04 \x01(\x0c*\x15\n\x05\x43urve\x12\x0c\n\x08\x45\x44_25519\x10\x01\x42S\n+com.google.security.cryptauth.lib.securegcmB\x1b\x44\x65viceToDeviceMessagesProtoH\x03\xa2\x02\x04SGCM')
