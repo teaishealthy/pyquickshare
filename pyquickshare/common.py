@@ -1,8 +1,11 @@
 import asyncio
+import atexit
 import base64
 import struct
 from enum import Enum
-from typing import TypeVar
+from typing import Any, TypeVar
+
+tasks: list[asyncio.Task[Any]] = []
 
 T = TypeVar("T")
 
@@ -13,6 +16,18 @@ def to_url64(data: bytes | bytearray) -> str:
 
 def from_url64(data: str) -> bytes:
     return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+
+
+def create_task(*args: Any, **kwargs: Any):
+    task = asyncio.create_task(*args, **kwargs)
+    tasks.append(task)
+    return task
+
+
+@atexit.register
+def shutdown():
+    for task in tasks:
+        task.cancel()
 
 
 class Type(Enum):

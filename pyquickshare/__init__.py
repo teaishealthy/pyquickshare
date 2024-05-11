@@ -17,7 +17,7 @@ import magic
 from cryptography.hazmat.primitives import hashes, hmac, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from .common import Type, from_url64, read, safe_assert
+from .common import Type, create_task, from_url64, read, safe_assert
 from .mdns.receive import IPV4Runner, make_n, make_service
 from .mdns.send import discover_services as _discover_services
 from .protos import (
@@ -42,6 +42,25 @@ __all__ = (
     "send_to",
     "receive",
 )
+
+
+class ShareRequest:
+    def __init__(
+        self, header: offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader
+    ):
+        self.response: asyncio.Future[bool] = asyncio.Future()
+        self.done: asyncio.Future[bool] = asyncio.Future()
+        self.header: offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader = (
+            header
+        )
+
+    async def accept(self) -> None:
+        self.response.set_result(True)
+        await self.done
+
+    async def reject(self) -> None:
+        self.response.set_result(False)
+        await self.done
 
 
 class ReceiveMode(enum.Enum):
@@ -286,7 +305,11 @@ def _decrypt(
     return payload_frame
 
 
-async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+async def _handle_client(
+    requests: asyncio.Queue[ShareRequest],
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+):
     start = time.perf_counter()
     ip, port = writer.get_extra_info("peername")
     nearby.debug("Connection from %s:%d", ip, port)
@@ -355,6 +378,7 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
     expected_files = -1
     receive_mode: ReceiveMode | None = None
     expected_payload_ids: list[int] = []
+    request: ShareRequest | None = None
 
     async for payload_header, data in _iter_payload_messages(reader, keychain):
         if payload_header.id in expected_payload_ids:
@@ -405,16 +429,28 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 elif wire_frame.v1.introduction.file_metadata:
                     receive_mode = ReceiveMode.FILES
                     expected_files = len(wire_frame.v1.introduction.file_metadata)
+                    request = ShareRequest(payload_header)
+                    await requests.put(request)
+                    result = await request.response
+
                     nearby.debug(
-                        "%r wants to send %r. Accepting",
+                        "%r wants to send %r",
                         name,
                         ", ".join(
                             m.name for m in wire_frame.v1.introduction.file_metadata
                         ),
                     )
-                    expected_payload_ids.extend(
-                        m.payload_id for m in wire_frame.v1.introduction.file_metadata
-                    )
+
+                    if result:
+                        nearby.debug("Accepting introduction")
+                        await send(_generate_accept())
+                        expected_payload_ids.extend(
+                            m.payload_id
+                            for m in wire_frame.v1.introduction.file_metadata
+                        )
+                    else:
+                        nearby.debug("Rejecting introduction")
+                        # TODO: send a rejection
 
                     await send(_generate_accept())
                 else:
@@ -433,6 +469,9 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
 
     nearby.debug("Connection with %r closed after %f seconds", name, duration)
 
+    if request:
+        request.done.set_result(True)
+
     writer.close()
     await writer.wait_closed()
 
@@ -441,9 +480,13 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
         await keep_alive_task
 
 
-async def _socket_server():
+async def _socket_server(requests: asyncio.Queue[ShareRequest]) -> None:
     # TODO: automatically pick a port, instead of hardcoding
-    server = await asyncio.start_server(_handle_client, "0.0.0.0", 12345)
+    server = await asyncio.start_server(
+        lambda reader, writer: _handle_client(requests, reader, writer),
+        "0.0.0.0",
+        12345,
+    )
 
     await server.serve_forever()
 
@@ -683,7 +726,7 @@ async def send_to(service: AsyncServiceInfo, *, file: str) -> None:
         await task
 
 
-async def receive() -> None:
+async def receive() -> AsyncIterator[ShareRequest,]:
     """Receive something over QuickShare. Runs forever.
 
     This function registers an mDNS service and opens a socket server to receive data.
@@ -695,16 +738,21 @@ async def receive() -> None:
         name=NAME.encode("utf-8"),
     )
     services = [info]
+    result: asyncio.Queue[ShareRequest] = asyncio.Queue()
 
-    task = asyncio.create_task(_socket_server())
+    create_task(_socket_server(result))
+    create_task(_start_mdns_service(services))
 
+    while True:
+        yield await result.get()
+
+
+async def _start_mdns_service(services: list[AsyncServiceInfo]) -> None:
     runner = IPV4Runner()
     try:
         await runner.register_services(services)
-    except KeyboardInterrupt:
+    except asyncio.CancelledError:
         await runner.unregister_services(services)
-        task.cancel()
-        await task
 
 
 async def discover_services() -> AsyncIterator[AsyncServiceInfo]:
