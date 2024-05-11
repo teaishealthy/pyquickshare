@@ -261,7 +261,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         offline_wire_formats_pb2.ConnectionResponseFrame.ACCEPT
     )
     connection_response.v1.connection_response.os_info.type = (
-        offline_wire_formats_pb2.OsInfo.ANDROID  # 🐧
+        offline_wire_formats_pb2.OsInfo.LINUX  # 🐧
     )
     connection_response.v1.connection_response.multiplex_socket_bitmask = 0
 
@@ -633,7 +633,7 @@ async def send_to(service: AsyncServiceInfo, *, file: str) -> None:
         offline_wire_formats_pb2.ConnectionResponseFrame.ACCEPT
     )
     connection_response.v1.connection_response.os_info.type = (
-        offline_wire_formats_pb2.OsInfo.ANDROID  # 🐧
+        offline_wire_formats_pb2.OsInfo.LINUX  # 🐧
     )
     data = connection_response.SerializeToString()
     writer.write(struct.pack(">I", len(data)))
