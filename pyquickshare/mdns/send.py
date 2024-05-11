@@ -2,7 +2,6 @@ import asyncio
 import atexit
 import binascii
 import random
-from asyncio import sleep
 from logging import getLogger
 from typing import Any
 
@@ -97,11 +96,13 @@ async def trigger_devices():
 
     bluetooth.debug("Advertising QuickShare service")
 
-    await sleep(5)
+    # Wait forever, BlueZ keeps advertising while the D-Bus connection is open
+    await asyncio.Future()
 
 
 async def discover_services(timeout: float = 10) -> asyncio.Queue[AsyncServiceInfo]:
-    await trigger_devices()
+    task = asyncio.create_task(trigger_devices())
+    _tasks.append(task)
 
     runner = AsyncRunner()
 
@@ -113,6 +114,8 @@ async def discover_services(timeout: float = 10) -> asyncio.Queue[AsyncServiceIn
 
 @atexit.register
 def cleanup() -> None:
-    logger.debug("Shutting browser down")
+    if _tasks:
+        logger.debug("Shutting advertiser and browser down")
+
     for task in _tasks:
         task.cancel()

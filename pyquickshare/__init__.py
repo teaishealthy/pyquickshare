@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import enum
 import io
 import os
@@ -12,6 +13,7 @@ import time
 from logging import getLogger
 from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable
 
+import magic
 from cryptography.hazmat.primitives import hashes, hmac, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -63,6 +65,7 @@ async def keep_alive(
     send: Callable[[bytes], Awaitable[None]],
 ):
     keep_alive = offline_wire_formats_pb2.OfflineFrame()
+    keep_alive.version = offline_wire_formats_pb2.OfflineFrame.V1
     keep_alive.v1.type = offline_wire_formats_pb2.V1Frame.KEEP_ALIVE
     keep_alive.v1.keep_alive.ack = False
 
@@ -79,30 +82,49 @@ async def send_simple(
     writer: asyncio.StreamWriter,
     keychain: Keychain,
     sequence_number: Callable[[], int],
+    *,
+    id: int | None = None,
 ):
-    id = random.randint(0, 2**31 - 1)
+    total_size = len(frame)
+    id = id or random.randint(0, 2**31 - 1)
     payload = payloadify(
-        frame, keychain, flags=0, id=id, sequence_number=sequence_number
+        frame,
+        keychain,
+        flags=0,
+        id=id,
+        total_size=total_size,
+        sequence_number=sequence_number,
+        type=offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.BYTES,
     )
 
     writer.write(struct.pack(">I", len(payload)))
     writer.write(payload)
-    await writer.drain()
 
     finished = payloadify(
-        b"", keychain, flags=1, id=id, sequence_number=sequence_number
+        b"",
+        keychain,
+        flags=1,
+        id=id,
+        total_size=total_size,
+        sequence_number=sequence_number,
+        type=offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.BYTES,
     )
     writer.write(struct.pack(">I", len(finished)))
     writer.write(finished)
+    await writer.drain()
 
 
 def payloadify(
     frame: bytes,
     keychain: Keychain,
     *,
+    offset: int = 0,
+    total_size: int | None = None,
+    type: offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.PayloadType,
     flags: int,
     id: int,
     sequence_number: Callable[[], int],
+    file_name: str | None = None,
 ) -> bytes:
     # We're working from the inside out here
 
@@ -110,14 +132,17 @@ def payloadify(
     payload_frame.v1.type = offline_wire_formats_pb2.V1Frame.PAYLOAD_TRANSFER
     payload_frame.version = offline_wire_formats_pb2.OfflineFrame.V1
     payload_frame.v1.payload_transfer.payload_header.id = id
-    payload_frame.v1.payload_transfer.payload_header.type = (
-        offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.BYTES
+    payload_frame.v1.payload_transfer.payload_header.type = type
+    if file_name:
+        payload_frame.v1.payload_transfer.payload_header.file_name = file_name
+    payload_frame.v1.payload_transfer.payload_header.total_size = total_size or len(
+        frame
     )
-    payload_frame.v1.payload_transfer.payload_header.total_size = len(frame)
+    payload_frame.v1.payload_transfer.payload_header.is_sensitive = False
     payload_frame.v1.payload_transfer.packet_type = (
         offline_wire_formats_pb2.PayloadTransferFrame.DATA
     )
-    payload_frame.v1.payload_transfer.payload_chunk.offset = 0
+    payload_frame.v1.payload_transfer.payload_chunk.offset = offset
     payload_frame.v1.payload_transfer.payload_chunk.flags = flags
     payload_frame.v1.payload_transfer.payload_chunk.body = frame
 
@@ -300,6 +325,15 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                             for m in wire_frame.v1.introduction.wifi_credentials_metadata
                         ),
                     )
+
+                    accept = wire_format_pb2.Frame()
+                    accept.v1.type = wire_format_pb2.V1Frame.RESPONSE
+                    accept.version = wire_format_pb2.Frame.V1
+                    accept.v1.connection_response.status = (
+                        wire_format_pb2.ConnectionResponseFrame.ACCEPT
+                    )
+
+                    await send(accept.SerializeToString())
                 elif wire_frame.v1.introduction.file_metadata:
                     receive_mode = ReceiveMode.FILES
                     expected_files = len(wire_frame.v1.introduction.file_metadata)
@@ -321,6 +355,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                     await send(accept.SerializeToString())
                 else:
                     nearby.debug("Received unknown frame %d", payload_header.id)
+            else:
+                nearby.debug("Received unknown frame %d", payload_header.id)
 
         if received_files == expected_files and receive_mode is ReceiveMode.FILES:
             break
@@ -370,13 +406,13 @@ async def receive_entrypoint() -> None:
         await task
 
 
-async def send_entrypoint() -> None:
+async def send_entrypoint(file: str) -> None:
     """Send something over QuickShare. Picks the first discovered service and sends data to it."""
     services = await discover_services()
 
     first = await services.get()
 
-    return await send_to(first)
+    return await send_to(first, file=file)
 
 
 async def payload_messages(
@@ -396,7 +432,7 @@ async def payload_messages(
         original_frame = decrypt(secure_message, keychain)
 
         if original_frame.v1.type == offline_wire_formats_pb2.V1Frame.DISCONNECTION:
-            nearby.debug("Received DISCONNECTION: %r", original_frame)
+            nearby.debug("Received DISCONNECTION")
             break
 
         elif (
@@ -429,7 +465,93 @@ async def payload_messages(
             yield original_header, payload
 
 
-async def send_to(service: AsyncServiceInfo):
+def mime_to_type(mime_type: str) -> wire_format_pb2.FileMetadata.Type:
+    namespace = mime_type.split("/")[0]
+
+    if mime_type == "application/vnd.android.package-archive":
+        return wire_format_pb2.FileMetadata.APP
+    elif namespace == "audio":
+        return wire_format_pb2.FileMetadata.AUDIO
+    elif namespace == "image":
+        return wire_format_pb2.FileMetadata.IMAGE
+    elif namespace == "video":
+        return wire_format_pb2.FileMetadata.VIDEO
+    else:
+        return wire_format_pb2.FileMetadata.UNKNOWN
+
+
+def make_file_metadata(fp: str, id: int) -> wire_format_pb2.FileMetadata:
+    mime = magic.from_file(  # type: ignore
+        fp,
+        mime=True,
+    )
+    size = os.path.getsize(fp)
+    name = os.path.basename(fp)
+
+    return wire_format_pb2.FileMetadata(
+        name=name,
+        type=mime_to_type(mime),
+        mime_type=mime,
+        size=size,
+        payload_id=id,
+    )
+
+
+async def _send_file(
+    *,
+    file: str,
+    writer: asyncio.StreamWriter,
+    keychain: Keychain,
+    sequence_number: Callable[[], int],
+    id: int,
+) -> None:
+    total_size = os.path.getsize(file)
+    nearby.debug("Sending file %r", file)
+    file_name = os.path.basename(file)
+
+    with open(file, "rb") as f:
+        while True:
+            offset = f.tell()
+            # 512KB chunks
+            chunk = f.read(512 * 1024)
+
+            if not chunk:
+                break
+
+            payload = payloadify(
+                chunk,
+                keychain,
+                flags=0,
+                total_size=total_size,
+                offset=offset,
+                id=id,
+                file_name=file_name,
+                type=offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.FILE,
+                sequence_number=sequence_number,
+            )
+            writer.write(struct.pack(">I", len(payload)))
+            writer.write(payload)
+            await writer.drain()
+
+            file_name = None
+
+        payload = payloadify(
+            b"",
+            keychain,
+            flags=1,
+            total_size=total_size,
+            offset=f.tell(),
+            id=id,
+            type=offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.FILE,
+            sequence_number=sequence_number,
+        )
+
+        writer.write(struct.pack(">I", len(payload)))
+        writer.write(payload)
+        await writer.drain()
+
+
+async def send_to(service: AsyncServiceInfo, *, file: str) -> None:
     name = service.name.split(".")[0].lstrip("_")
 
     decoded = from_url64(name)
@@ -449,8 +571,7 @@ async def send_to(service: AsyncServiceInfo):
     _visible = bool(flags & 0b00000001)
     type = Type(flags >> 1 & 0b00000111)
 
-    name_length = n[17]
-    name = n[18 : 18 + name_length].decode("utf-8")
+    name = n[18:].decode("utf-8")
 
     nearby.debug("Endpoint %r has name %r and type %r", peer_endpoint_id, name, type)
 
@@ -511,8 +632,8 @@ async def send_to(service: AsyncServiceInfo):
     # Everything on the wire is now encrypted
     sequence_number = sequence_number_f()
 
-    async def send(payload: bytes) -> None:
-        await send_simple(payload, writer, keychain, sequence_number)
+    async def send(payload: bytes, *, id: int | None = None) -> None:
+        await send_simple(payload, writer, keychain, sequence_number, id=id)
 
     paired_key_encryption = make_paired_key_encryption()
     await send(paired_key_encryption.SerializeToString())
@@ -535,18 +656,13 @@ async def send_to(service: AsyncServiceInfo):
 
     await send(paired_key_result.SerializeToString())
 
+    id = random.randint(0, 2**31 - 1)
+    meta = make_file_metadata(file, id)
     introduction_frame = wire_format_pb2.Frame()
     introduction_frame.v1.type = wire_format_pb2.V1Frame.INTRODUCTION
     introduction_frame.version = wire_format_pb2.Frame.V1
-    introduction_frame.v1.introduction.file_metadata.append(
-        wire_format_pb2.FileMetadata(
-            name="test.mp4",
-            type=wire_format_pb2.FileMetadata.VIDEO,
-            mime_type="video/mp4",
-            size=123456,
-            id=123123,
-        )
-    )
+
+    introduction_frame.v1.introduction.file_metadata.append(meta)
     await send(introduction_frame.SerializeToString())
 
     async for payload_header, data in payload_messages(reader, keychain):
@@ -556,11 +672,28 @@ async def send_to(service: AsyncServiceInfo):
         if wire_frame.v1.type == wire_format_pb2.V1Frame.PAIRED_KEY_RESULT:
             # we know we failed this, and we can just ignore it
             ...
+        elif wire_frame.v1.type == wire_format_pb2.V1Frame.RESPONSE:
+            status = wire_frame.v1.connection_response.status
+
+            if status == wire_format_pb2.ConnectionResponseFrame.ACCEPT:
+                nearby.debug("Peer accepted our introduction. Ready to send")
+                await _send_file(
+                    file=file,
+                    writer=writer,
+                    keychain=keychain,
+                    sequence_number=sequence_number,
+                    id=id,
+                )
+            else:
+                nearby.debug("Peer rejected our introduction. Aborting")
+                break
         else:
-            logger.warning("Received unknown frame %d", payload_header.type)
+            logger.warning("Received unknown frame %d", payload_header.id)
 
     task.cancel()
-    await task
+
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
 
 
 def make_paired_key_encryption():
