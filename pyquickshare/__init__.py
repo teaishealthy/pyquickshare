@@ -10,12 +10,12 @@ import string
 import struct
 import time
 from logging import getLogger
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable
 
 from cryptography.hazmat.primitives import hashes, hmac, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from .common import Type, from_url64, safe_assert
+from .common import Type, from_url64, read, safe_assert
 from .mdns.receive import IPV4Runner, make_n, make_service
 from .mdns.send import discover_services
 from .protos import (
@@ -194,9 +194,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     nearby.debug("Connection from %s:%d", ip, port)
 
     # 4-byte big-endian length
-    (length,) = struct.unpack(">I", await reader.readexactly(4))
-
-    data = await reader.readexactly(length)
+    data = await read(reader)
 
     connection_request = offline_wire_formats_pb2.OfflineFrame()
     connection_request.ParseFromString(data)
@@ -221,8 +219,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
     # We don't actually need to include all this data, an empty frame would be fine
 
-    (length,) = struct.unpack(">I", await reader.readexactly(4))
-    data = await reader.readexactly(length)
+    data = await read(reader)
+
     client_connection_response = offline_wire_formats_pb2.OfflineFrame()
     client_connection_response.ParseFromString(data)
     os = offline_wire_formats_pb2.OsInfo.OsType.Name(
@@ -251,135 +249,81 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
     sequence_number = sequence_number_f()
 
+    async def send(payload: bytes) -> None:
+        await send_simple(payload, writer, keychain, sequence_number)
+
     nearby.debug("Connection established with %r", name)
 
     # ¯\_(ツ)_/¯
-    paired_key_encryption = wire_format_pb2.Frame()
-    paired_key_encryption.v1.type = wire_format_pb2.V1Frame.PAIRED_KEY_ENCRYPTION
-    paired_key_encryption.version = wire_format_pb2.Frame.V1
-    paired_key_encryption.v1.paired_key_encryption.secret_id_hash = bytes([0x00] * 6)  # fmt: off
-    paired_key_encryption.v1.paired_key_encryption.signed_data = bytes([0x00] * 72)
-    await send_simple(
-        paired_key_encryption.SerializeToString(), writer, keychain, sequence_number
-    )
+    paired_key_encryption = make_paired_key_encryption()
+    await send(paired_key_encryption.SerializeToString())
 
     await writer.drain()
 
     nearby.debug("Sent PAIRED_KEY_ENCRYPTION")
 
-    keep_alive_task = asyncio.create_task(
-        keep_alive(lambda x: send_simple(x, writer, keychain, sequence_number))
-    )
-
-    # maps message IDs to buffers
-    incomplete_payloads: dict[int, io.BytesIO] = {}
-    file_infos: dict[
-        int, offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader
-    ] = {}
+    keep_alive_task = asyncio.create_task(keep_alive(send))
 
     received_files = 0
     expected_files = -1
     receive_mode: ReceiveMode | None = None
 
-    while (expected_files != received_files) or receive_mode != ReceiveMode.FILES:
-        (length,) = struct.unpack(">I", await reader.readexactly(4))
-        data = await reader.readexactly(length)
-
-        secure_message = securemessage_pb2.SecureMessage()
-        secure_message.ParseFromString(data)
-
-        original_frame = decrypt(secure_message, keychain)
-
-        if original_frame.v1.type == offline_wire_formats_pb2.V1Frame.DISCONNECTION:
-            nearby.debug("Received DISCONNECTION: %r", original_frame)
-            break
-
-        elif (
-            original_frame.v1.type != offline_wire_formats_pb2.V1Frame.PAYLOAD_TRANSFER
+    async for payload_header, data in payload_messages(reader, keychain):
+        if (
+            payload_header.type
+            == offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.FILE
         ):
-            continue
+            received_files += 1
+            nearby.debug(
+                "Received full file, saving to downloads/%s", payload_header.file_name
+            )
+            with open(f"downloads/{payload_header.file_name}", "wb") as f:
+                f.write(data)
 
-        payload_header = original_frame.v1.payload_transfer.payload_header
-        payload_chunk = original_frame.v1.payload_transfer.payload_chunk
+        else:
+            wire_frame = wire_format_pb2.Frame()
+            wire_frame.ParseFromString(data)
 
-        if payload_header.id not in incomplete_payloads:
-            incomplete_payloads[payload_header.id] = io.BytesIO()
-
-            if (
-                payload_header.type
-                == offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.FILE
-            ):
-                file_infos[payload_header.id] = payload_header
-
-        buffer = incomplete_payloads[payload_header.id]
-
-        offset = payload_chunk.offset
-        buffer.seek(offset)
-        buffer.write(payload_chunk.body)
-
-        nearby.debug("Received payload chunk %d", payload_header.id)
-        if payload_chunk.flags & 0b00000001:
-            incomplete_payloads.pop(payload_header.id)
-
-            buffer.seek(0)
-            payload = buffer.read()
-            buffer.close()
-
-            if (
-                original_frame.v1.payload_transfer.payload_header.type
-                == offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.FILE
-            ):
-                received_files += 1
-
-                file_info = file_infos.pop(payload_header.id)
-                file_path = f"downloads/{file_info.file_name}"
-                nearby.debug("Received full file data")
-                with open(file_path, "wb") as f:
-                    f.write(payload)
-                nearby.debug("Wrote file to %s", file_path)
-
-                continue
-
-            frame = wire_format_pb2.Frame()
-            frame.ParseFromString(payload)
-
-            if frame.v1.type == wire_format_pb2.V1Frame.PAIRED_KEY_RESULT:
+            if wire_frame.v1.type == wire_format_pb2.V1Frame.PAIRED_KEY_RESULT:
                 # we know we failed this, and we just mirror the response
-                await send_simple(payload, writer, keychain, sequence_number)
-            elif frame.v1.type == wire_format_pb2.V1Frame.PAIRED_KEY_ENCRYPTION:
+                await send(wire_frame.SerializeToString())
+            elif wire_frame.v1.type == wire_format_pb2.V1Frame.PAIRED_KEY_ENCRYPTION:
                 # we don't really care about this, but I just don't want to see it in the logs
                 ...
-            elif frame.v1.type == wire_format_pb2.V1Frame.INTRODUCTION:
-                if frame.v1.introduction.wifi_credentials_metadata:
+            elif wire_frame.v1.type == wire_format_pb2.V1Frame.INTRODUCTION:
+                if wire_frame.v1.introduction.wifi_credentials_metadata:
                     receive_mode = ReceiveMode.WIFI
                     nearby.debug(
                         "Receiving wifi credentials for ssids %r",
                         ", ".join(
                             m.ssid
-                            for m in frame.v1.introduction.wifi_credentials_metadata
+                            for m in wire_frame.v1.introduction.wifi_credentials_metadata
                         ),
                     )
-                elif frame.v1.introduction.file_metadata:
+                elif wire_frame.v1.introduction.file_metadata:
                     receive_mode = ReceiveMode.FILES
-                    expected_files = len(frame.v1.introduction.file_metadata)
+                    expected_files = len(wire_frame.v1.introduction.file_metadata)
                     nearby.debug(
                         "%r wants to send %r. Accepting",
                         name,
-                        ", ".join(m.name for m in frame.v1.introduction.file_metadata),
+                        ", ".join(
+                            m.name for m in wire_frame.v1.introduction.file_metadata
+                        ),
                     )
 
-                accept = wire_format_pb2.Frame()
-                accept.v1.type = wire_format_pb2.V1Frame.RESPONSE
-                accept.version = wire_format_pb2.Frame.V1
-                accept.v1.connection_response.status = (
-                    wire_format_pb2.ConnectionResponseFrame.ACCEPT
-                )
+                    accept = wire_format_pb2.Frame()
+                    accept.v1.type = wire_format_pb2.V1Frame.RESPONSE
+                    accept.version = wire_format_pb2.Frame.V1
+                    accept.v1.connection_response.status = (
+                        wire_format_pb2.ConnectionResponseFrame.ACCEPT
+                    )
 
-                await send_simple(
-                    accept.SerializeToString(), writer, keychain, sequence_number
-                )
-            else:
-                nearby.debug("Received unknown frame %d", payload_header.id)
+                    await send(accept.SerializeToString())
+                else:
+                    nearby.debug("Received unknown frame %d", payload_header.id)
+
+        if received_files == expected_files and receive_mode is ReceiveMode.FILES:
+            break
 
     duration = time.perf_counter() - start
 
@@ -433,6 +377,56 @@ async def send_entrypoint() -> None:
     first = await services.get()
 
     return await send_to(first)
+
+
+async def payload_messages(
+    reader: asyncio.StreamReader, keychain: Keychain
+) -> AsyncIterator[
+    tuple[offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader, bytes]
+]:
+    incomplete_payloads: dict[int, io.BytesIO] = {}
+    original_headers: dict[
+        int, offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader
+    ] = {}
+
+    while True:
+        secure_message = securemessage_pb2.SecureMessage()
+        secure_message.ParseFromString(await read(reader))
+
+        original_frame = decrypt(secure_message, keychain)
+
+        if original_frame.v1.type == offline_wire_formats_pb2.V1Frame.DISCONNECTION:
+            nearby.debug("Received DISCONNECTION: %r", original_frame)
+            break
+
+        elif (
+            original_frame.v1.type != offline_wire_formats_pb2.V1Frame.PAYLOAD_TRANSFER
+        ):
+            continue
+
+        payload_header = original_frame.v1.payload_transfer.payload_header
+        payload_chunk = original_frame.v1.payload_transfer.payload_chunk
+
+        if payload_header.id not in incomplete_payloads:
+            incomplete_payloads[payload_header.id] = io.BytesIO()
+            original_headers[payload_header.id] = payload_header
+
+        buffer = incomplete_payloads[payload_header.id]
+
+        offset = payload_chunk.offset
+        buffer.seek(offset)
+        buffer.write(payload_chunk.body)
+
+        nearby.debug("Received payload chunk %d", payload_header.id)
+        if payload_chunk.flags & 0b00000001:
+            incomplete_payloads.pop(payload_header.id)
+            original_header = original_headers.pop(payload_header.id)
+
+            buffer.seek(0)
+            payload = buffer.read()
+            buffer.close()
+
+            yield original_header, payload
 
 
 async def send_to(service: AsyncServiceInfo):
@@ -509,8 +503,7 @@ async def send_to(service: AsyncServiceInfo):
     writer.write(data)
     await writer.drain()
 
-    (length,) = struct.unpack(">I", await reader.readexactly(4))
-    data = await reader.readexactly(length)
+    data = await read(reader)
 
     peer_connection_response = offline_wire_formats_pb2.OfflineFrame()
     peer_connection_response.ParseFromString(data)
@@ -518,28 +511,18 @@ async def send_to(service: AsyncServiceInfo):
     # Everything on the wire is now encrypted
     sequence_number = sequence_number_f()
 
-    paired_key_encryption = wire_format_pb2.Frame()
-    paired_key_encryption.v1.type = wire_format_pb2.V1Frame.PAIRED_KEY_ENCRYPTION
-    paired_key_encryption.version = wire_format_pb2.Frame.V1
-    paired_key_encryption.v1.paired_key_encryption.secret_id_hash = bytes([0x00] * 6)  # fmt: off
-    paired_key_encryption.v1.paired_key_encryption.signed_data = bytes([0x00] * 72)
-    await send_simple(
-        paired_key_encryption.SerializeToString(), writer, keychain, sequence_number
-    )
+    async def send(payload: bytes) -> None:
+        await send_simple(payload, writer, keychain, sequence_number)
 
-    (length,) = struct.unpack(">I", await reader.readexactly(4))
-    data = await reader.readexactly(length)
-    logger.debug("Received %d bytes", length)
+    paired_key_encryption = make_paired_key_encryption()
+    await send(paired_key_encryption.SerializeToString())
+
+    data = await read(reader)
 
     secure_message = securemessage_pb2.SecureMessage()
     secure_message.ParseFromString(data)
 
     _peer_paired_key_encryption = decrypt(secure_message, keychain)
-
-    incomplete_payloads: dict[int, io.BytesIO] = {}
-
-    async def send(payload: bytes) -> None:
-        await send_simple(payload, writer, keychain, sequence_number)
 
     task = asyncio.create_task(keep_alive(send))
 
@@ -566,52 +549,24 @@ async def send_to(service: AsyncServiceInfo):
     )
     await send(introduction_frame.SerializeToString())
 
-    while True:
-        (length,) = struct.unpack(">I", await reader.readexactly(4))
-        data = await reader.readexactly(length)
+    async for payload_header, data in payload_messages(reader, keychain):
+        wire_frame = wire_format_pb2.Frame()
+        wire_frame.ParseFromString(data)
 
-        secure_message = securemessage_pb2.SecureMessage()
-        secure_message.ParseFromString(data)
-
-        original_frame = decrypt(secure_message, keychain)
-
-        if original_frame.v1.type == offline_wire_formats_pb2.V1Frame.DISCONNECTION:
-            nearby.debug("Received DISCONNECTION: %r", original_frame)
-            break
-
-        elif (
-            original_frame.v1.type != offline_wire_formats_pb2.V1Frame.PAYLOAD_TRANSFER
-        ):
-            continue
-
-        payload_header = original_frame.v1.payload_transfer.payload_header
-        payload_chunk = original_frame.v1.payload_transfer.payload_chunk
-
-        if payload_header.id not in incomplete_payloads:
-            incomplete_payloads[payload_header.id] = io.BytesIO()
-
-        buffer = incomplete_payloads[payload_header.id]
-
-        offset = payload_chunk.offset
-        buffer.seek(offset)
-        buffer.write(payload_chunk.body)
-
-        nearby.debug("Received payload chunk %d", payload_header.id)
-        if payload_chunk.flags & 0b00000001:
-            incomplete_payloads.pop(payload_header.id)
-
-            buffer.seek(0)
-            payload = buffer.read()
-            buffer.close()
-
-            wire_frame = wire_format_pb2.Frame()
-            wire_frame.ParseFromString(payload)
-
-            if wire_frame.v1.type == wire_format_pb2.V1Frame.PAIRED_KEY_RESULT:
-                # we know we failed this, and we can just ignore it
-                ...
-            else:
-                logger.warning("Received unknown frame %d", payload_header.type)
+        if wire_frame.v1.type == wire_format_pb2.V1Frame.PAIRED_KEY_RESULT:
+            # we know we failed this, and we can just ignore it
+            ...
+        else:
+            logger.warning("Received unknown frame %d", payload_header.type)
 
     task.cancel()
     await task
+
+
+def make_paired_key_encryption():
+    paired_key_encryption = wire_format_pb2.Frame()
+    paired_key_encryption.v1.type = wire_format_pb2.V1Frame.PAIRED_KEY_ENCRYPTION
+    paired_key_encryption.version = wire_format_pb2.Frame.V1
+    paired_key_encryption.v1.paired_key_encryption.secret_id_hash = bytes([0x00] * 6)  # fmt: off
+    paired_key_encryption.v1.paired_key_encryption.signed_data = bytes([0x00] * 72)
+    return paired_key_encryption

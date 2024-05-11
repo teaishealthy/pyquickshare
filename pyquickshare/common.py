@@ -1,4 +1,6 @@
+import asyncio
 import base64
+import struct
 from enum import Enum
 from typing import TypeVar
 
@@ -26,3 +28,8 @@ VERSION = 0b000
 def safe_assert(condition: bool, message: str | None = None) -> None:
     if not condition:
         raise AssertionError(message or "Assertion failed")
+
+
+async def read(reader: asyncio.StreamReader) -> bytes:
+    (length,) = struct.unpack(">I", await reader.readexactly(4))
+    return await reader.readexactly(length)

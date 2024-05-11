@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from .common import read
 from .protos import securemessage_pb2, ukey_pb2
 
 KEYCHAIN_SALT = hashlib.sha256(b"SecureMessage").digest()
@@ -269,9 +270,7 @@ async def do_server_key_exchange(
 ) -> Keychain | None:
     ukey_message = ukey_pb2.Ukey2Message()
 
-    (length,) = struct.unpack(">I", await reader.readexactly(4))
-
-    m1 = await reader.readexactly(length)
+    m1 = await read(reader)
 
     ukey_message.ParseFromString(m1)
 
@@ -298,10 +297,8 @@ async def do_server_key_exchange(
 
     m2 = await send_server_init(private_key, cipher_commitment, writer)
 
-    (length,) = struct.unpack(">I", await reader.readexactly(4))
-
     peer_public_key = await parse_client_finished(
-        await reader.readexactly(length), cipher_commitment, writer
+        await read(reader), cipher_commitment, writer
     )
 
     if not peer_public_key:
@@ -350,8 +347,7 @@ async def do_client_key_exchange(
     await writer.drain()
 
     # SERVER_INIT
-    (length,) = struct.unpack(">I", await reader.readexactly(4))
-    m2 = await reader.readexactly(length)
+    m2 = await read(reader)
 
     message_framing = ukey_pb2.Ukey2Message()
     message_framing.ParseFromString(m2)
