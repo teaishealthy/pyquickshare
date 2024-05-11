@@ -67,6 +67,7 @@ class ShareRequest:
 class ReceiveMode(enum.Enum):
     WIFI = 1
     FILES = 2
+    TEXT = 3
 
 
 def _mime_to_type(mime_type: str) -> wire_format_pb2.FileMetadata.Type:
@@ -424,6 +425,17 @@ async def _handle_client(
                         security_type=metadata.security_type,
                     )
                 )
+            elif receive_mode is ReceiveMode.TEXT:
+                metadata = cast(wire_format_pb2.TextMetadata, metadata)
+
+                nearby.debug("Received text %d", payload_header.id)
+
+                results.append(
+                    TextResult(
+                        title=metadata.text_title,
+                        text=data.decode("utf-8"),
+                    )
+                )
 
         else:
             wire_frame = wire_format_pb2.Frame()
@@ -483,6 +495,19 @@ async def _handle_client(
                     else:
                         nearby.debug("Rejecting introduction")
                         # TODO: send a rejection
+
+                    await send(_generate_accept())
+                elif wire_frame.v1.introduction.text_metadata:
+                    receive_mode = ReceiveMode.TEXT
+                    request = ShareRequest(payload_header)
+                    await requests.put(request)
+                    nearby.debug("Receiving text")
+                    expected_payload_ids.update(
+                        {
+                            m.payload_id: m
+                            for m in wire_frame.v1.introduction.text_metadata
+                        }
+                    )
 
                     await send(_generate_accept())
                 else:

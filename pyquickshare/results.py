@@ -12,6 +12,7 @@ class FileResult(NamedTuple):
 
 
 class TextResult(NamedTuple):
+    title: str
     text: str
 
 
