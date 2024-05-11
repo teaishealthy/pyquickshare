@@ -26,7 +26,8 @@ async def main(argv: list[str]) -> None:
         await send(argv[2])
     elif argv[1] == "receive":
         async for request in pyquickshare.receive():
-            await request.accept()
+            results = await request.accept()
+            print(results)
 
     else:
         print("Unknown mode:", argv[1])

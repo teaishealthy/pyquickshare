@@ -11,7 +11,7 @@ import string
 import struct
 import time
 from logging import getLogger
-from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable
+from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable, cast
 
 import magic
 from cryptography.hazmat.primitives import hashes, hmac, padding
@@ -27,6 +27,7 @@ from .protos import (
     securemessage_pb2,
     wire_format_pb2,
 )
+from .results import FileResult, Result, TextResult, WifiResult
 from .ukey2 import Keychain, do_client_key_exchange, do_server_key_exchange
 
 NAME = "pyquickshare"
@@ -49,14 +50,14 @@ class ShareRequest:
         self, header: offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader
     ):
         self.response: asyncio.Future[bool] = asyncio.Future()
-        self.done: asyncio.Future[bool] = asyncio.Future()
+        self.done: asyncio.Future[list[Result]] = asyncio.Future()
         self.header: offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader = (
             header
         )
 
-    async def accept(self) -> None:
+    async def accept(self) -> list[Result]:
         self.response.set_result(True)
-        await self.done
+        return await self.done
 
     async def reject(self) -> None:
         self.response.set_result(False)
@@ -374,30 +375,56 @@ async def _handle_client(
 
     keep_alive_task = asyncio.create_task(_keep_alive(send))
 
-    received_files = 0
-    expected_files = -1
     receive_mode: ReceiveMode | None = None
-    expected_payload_ids: list[int] = []
+    expected_payload_ids: dict[
+        int,
+        wire_format_pb2.WifiCredentialsMetadata
+        | wire_format_pb2.FileMetadata
+        | wire_format_pb2.TextMetadata,
+    ] = {}
+
     request: ShareRequest | None = None
+    results: list[Result] = []
 
     async for payload_header, data in _iter_payload_messages(reader, keychain):
         if payload_header.id in expected_payload_ids:
-            expected_payload_ids.remove(payload_header.id)
+            metadata = expected_payload_ids.pop(payload_header.id)
 
             if receive_mode is ReceiveMode.FILES:
-                received_files += 1
+                metadata = cast(wire_format_pb2.FileMetadata, metadata)
+
                 nearby.debug(
                     "Received full file, saving to downloads/%s",
                     payload_header.file_name,
                 )
                 with open(f"downloads/{payload_header.file_name}", "wb") as f:
                     f.write(data)
+
+                results.append(
+                    FileResult(
+                        name=payload_header.file_name,
+                        path=f"downloads/{payload_header.file_name}",
+                        size=payload_header.total_size,
+                    )
+                )
             elif receive_mode is ReceiveMode.WIFI:
+                metadata = cast(wire_format_pb2.WifiCredentialsMetadata, metadata)
+
+                metadata.security_type
+
                 credentials = wire_format_pb2.WifiCredentials()
                 credentials.ParseFromString(data)
 
                 nearby.debug("Received wifi credentials %r", credentials.password)
-                break
+
+                results.append(
+                    WifiResult(
+                        ssid=metadata.ssid,
+                        password=credentials.password,
+                        security_type=metadata.security_type,
+                    )
+                )
+
         else:
             wire_frame = wire_format_pb2.Frame()
             wire_frame.ParseFromString(data)
@@ -411,6 +438,8 @@ async def _handle_client(
             elif wire_frame.v1.type == wire_format_pb2.V1Frame.INTRODUCTION:
                 if wire_frame.v1.introduction.wifi_credentials_metadata:
                     receive_mode = ReceiveMode.WIFI
+                    request = ShareRequest(payload_header)
+                    await requests.put(request)
                     nearby.debug(
                         "Receiving wifi credentials for ssids %r",
                         ", ".join(
@@ -419,16 +448,17 @@ async def _handle_client(
                         ),
                     )
 
-                    expected_payload_ids.extend(
-                        m.payload_id
-                        for m in wire_frame.v1.introduction.wifi_credentials_metadata
+                    expected_payload_ids.update(
+                        {
+                            m.payload_id: m
+                            for m in wire_frame.v1.introduction.wifi_credentials_metadata
+                        }
                     )
 
                     await send(_generate_accept())
 
                 elif wire_frame.v1.introduction.file_metadata:
                     receive_mode = ReceiveMode.FILES
-                    expected_files = len(wire_frame.v1.introduction.file_metadata)
                     request = ShareRequest(payload_header)
                     await requests.put(request)
                     result = await request.response
@@ -444,9 +474,11 @@ async def _handle_client(
                     if result:
                         nearby.debug("Accepting introduction")
                         await send(_generate_accept())
-                        expected_payload_ids.extend(
-                            m.payload_id
-                            for m in wire_frame.v1.introduction.file_metadata
+                        expected_payload_ids.update(
+                            {
+                                m.payload_id: m
+                                for m in wire_frame.v1.introduction.file_metadata
+                            }
                         )
                     else:
                         nearby.debug("Rejecting introduction")
@@ -464,13 +496,10 @@ async def _handle_client(
 
     duration = time.perf_counter() - start
 
-    if expected_files == received_files:
-        nearby.debug("Received all files")
-
     nearby.debug("Connection with %r closed after %f seconds", name, duration)
 
     if request:
-        request.done.set_result(True)
+        request.done.set_result(results)
 
     writer.close()
     await writer.wait_closed()
