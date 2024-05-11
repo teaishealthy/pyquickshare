@@ -446,7 +446,7 @@ async def send_to(service: AsyncServiceInfo):
     n = from_url64(n_raw.decode("utf-8"))
 
     flags = n[0]
-    visible = bool(flags & 0b00000001)
+    _visible = bool(flags & 0b00000001)
     type = Type(flags >> 1 & 0b00000111)
 
     name_length = n[17]
@@ -471,7 +471,7 @@ async def send_to(service: AsyncServiceInfo):
         offline_wire_formats_pb2.OsInfo.LINUX  # 🐧 again
     )
     connection_request.v1.connection_request.endpoint_info = bytes(
-        make_n(visible=visible, type=Type.tablet, name="pyquickshare".encode("utf-8"))
+        make_n(visible=True, type=Type.tablet, name="pyquickshare".encode("utf-8"))
     )
     connection_request.v1.connection_request.mediums.append(
         offline_wire_formats_pb2.ConnectionRequestFrame.WIFI_LAN
