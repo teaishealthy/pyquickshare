@@ -292,19 +292,26 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     received_files = 0
     expected_files = -1
     receive_mode: ReceiveMode | None = None
+    expected_payload_ids: list[int] = []
 
     async for payload_header, data in payload_messages(reader, keychain):
-        if (
-            payload_header.type
-            == offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.FILE
-        ):
-            received_files += 1
-            nearby.debug(
-                "Received full file, saving to downloads/%s", payload_header.file_name
-            )
-            with open(f"downloads/{payload_header.file_name}", "wb") as f:
-                f.write(data)
+        if payload_header.id in expected_payload_ids:
+            expected_payload_ids.remove(payload_header.id)
 
+            if receive_mode is ReceiveMode.FILES:
+                received_files += 1
+                nearby.debug(
+                    "Received full file, saving to downloads/%s",
+                    payload_header.file_name,
+                )
+                with open(f"downloads/{payload_header.file_name}", "wb") as f:
+                    f.write(data)
+            elif receive_mode is ReceiveMode.WIFI:
+                credentials = wire_format_pb2.WifiCredentials()
+                credentials.ParseFromString(data)
+
+                nearby.debug("Received wifi credentials %r", credentials.password)
+                break
         else:
             wire_frame = wire_format_pb2.Frame()
             wire_frame.ParseFromString(data)
@@ -326,6 +333,11 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                         ),
                     )
 
+                    expected_payload_ids.extend(
+                        m.payload_id
+                        for m in wire_frame.v1.introduction.wifi_credentials_metadata
+                    )
+
                     accept = wire_format_pb2.Frame()
                     accept.v1.type = wire_format_pb2.V1Frame.RESPONSE
                     accept.version = wire_format_pb2.Frame.V1
@@ -344,6 +356,9 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                             m.name for m in wire_frame.v1.introduction.file_metadata
                         ),
                     )
+                    expected_payload_ids.extend(
+                        m.payload_id for m in wire_frame.v1.introduction.file_metadata
+                    )
 
                     accept = wire_format_pb2.Frame()
                     accept.v1.type = wire_format_pb2.V1Frame.RESPONSE
@@ -358,7 +373,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             else:
                 nearby.debug("Received unknown frame %d", payload_header.id)
 
-        if received_files == expected_files and receive_mode is ReceiveMode.FILES:
+        if len(expected_payload_ids) == 0 and receive_mode is not None:
             break
 
     duration = time.perf_counter() - start
@@ -372,7 +387,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     await writer.wait_closed()
 
     keep_alive_task.cancel()
-    await keep_alive_task
+    with contextlib.suppress(asyncio.CancelledError):
+        await keep_alive_task
 
 
 async def socket_server():
