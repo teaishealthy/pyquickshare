@@ -19,7 +19,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from .common import Type, from_url64, read, safe_assert
 from .mdns.receive import IPV4Runner, make_n, make_service
-from .mdns.send import discover_services
+from .mdns.send import discover_services as _discover_services
 from .protos import (
     device_to_device_messages_pb2,
     offline_wire_formats_pb2,
@@ -38,12 +38,33 @@ if TYPE_CHECKING:
     from zeroconf.asyncio import AsyncServiceInfo
 
 
+__all__ = (
+    "send_to",
+    "receive",
+)
+
+
 class ReceiveMode(enum.Enum):
     WIFI = 1
     FILES = 2
 
 
-def sequence_number_f() -> Callable[[], int]:
+def _mime_to_type(mime_type: str) -> wire_format_pb2.FileMetadata.Type:
+    namespace = mime_type.split("/")[0]
+
+    if mime_type == "application/vnd.android.package-archive":
+        return wire_format_pb2.FileMetadata.APP
+    elif namespace == "audio":
+        return wire_format_pb2.FileMetadata.AUDIO
+    elif namespace == "image":
+        return wire_format_pb2.FileMetadata.IMAGE
+    elif namespace == "video":
+        return wire_format_pb2.FileMetadata.VIDEO
+    else:
+        return wire_format_pb2.FileMetadata.UNKNOWN
+
+
+def _make_sequence_number() -> Callable[[], int]:
     sequence_number = 0
 
     def f() -> int:
@@ -54,14 +75,103 @@ def sequence_number_f() -> Callable[[], int]:
     return f
 
 
-def make_enpoint_id() -> bytes:
+def _make_send(
+    writer: asyncio.StreamWriter,
+    keychain: Keychain,
+    sequence_number: Callable[[], int],
+):
+    async def send(frame: bytes, *, id: int | None = None) -> None:
+        total_size = len(frame)
+        id = id or random.randint(0, 2**31 - 1)
+        payload = _payloadify(
+            frame,
+            keychain,
+            flags=0,
+            id=id,
+            total_size=total_size,
+            sequence_number=sequence_number,
+            type=offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.BYTES,
+        )
+
+        writer.write(struct.pack(">I", len(payload)))
+        writer.write(payload)
+
+        finished = _payloadify(
+            b"",
+            keychain,
+            flags=1,
+            id=id,
+            total_size=total_size,
+            sequence_number=sequence_number,
+            type=offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.BYTES,
+        )
+        writer.write(struct.pack(">I", len(finished)))
+        writer.write(finished)
+        await writer.drain()
+
+    return send
+
+
+def _generate_enpoint_id() -> bytes:
     # 4-byte alphanum
     return "".join(random.choices(string.ascii_letters + string.digits, k=4)).encode(
         "ascii"
     )
 
 
-async def keep_alive(
+def _generate_paired_key_encryption():
+    paired_key_encryption = wire_format_pb2.Frame()
+    paired_key_encryption.v1.type = wire_format_pb2.V1Frame.PAIRED_KEY_ENCRYPTION
+    paired_key_encryption.version = wire_format_pb2.Frame.V1
+    paired_key_encryption.v1.paired_key_encryption.secret_id_hash = bytes([0x00] * 6)  # fmt: off
+    paired_key_encryption.v1.paired_key_encryption.signed_data = bytes([0x00] * 72)
+    return paired_key_encryption
+
+
+def _generate_file_metadata(fp: str, id: int) -> wire_format_pb2.FileMetadata:
+    mime = magic.from_file(  # type: ignore
+        fp,
+        mime=True,
+    )
+    size = os.path.getsize(fp)
+    name = os.path.basename(fp)
+
+    return wire_format_pb2.FileMetadata(
+        name=name,
+        type=_mime_to_type(mime),
+        mime_type=mime,
+        size=size,
+        payload_id=id,
+    )
+
+
+def _generate_connection_response():
+    connection_response = offline_wire_formats_pb2.OfflineFrame()
+    connection_response.version = offline_wire_formats_pb2.OfflineFrame.V1
+    connection_response.v1.type = offline_wire_formats_pb2.V1Frame.CONNECTION_RESPONSE
+    connection_response.v1.connection_response.status = 0
+    connection_response.v1.connection_response.response = (
+        offline_wire_formats_pb2.ConnectionResponseFrame.ACCEPT
+    )
+    connection_response.v1.connection_response.os_info.type = (
+        offline_wire_formats_pb2.OsInfo.LINUX  # 🐧
+    )
+    connection_response.v1.connection_response.multiplex_socket_bitmask = 0
+    return connection_response
+
+
+def _generate_accept() -> bytes:
+    accept = wire_format_pb2.Frame()
+    accept.v1.type = wire_format_pb2.V1Frame.RESPONSE
+    accept.version = wire_format_pb2.Frame.V1
+    accept.v1.connection_response.status = (
+        wire_format_pb2.ConnectionResponseFrame.ACCEPT
+    )
+
+    return accept.SerializeToString()
+
+
+async def _keep_alive(
     send: Callable[[bytes], Awaitable[None]],
 ):
     keep_alive = offline_wire_formats_pb2.OfflineFrame()
@@ -77,54 +187,17 @@ async def keep_alive(
         await asyncio.sleep(10)
 
 
-async def send_simple(
-    frame: bytes,
-    writer: asyncio.StreamWriter,
-    keychain: Keychain,
-    sequence_number: Callable[[], int],
-    *,
-    id: int | None = None,
-):
-    total_size = len(frame)
-    id = id or random.randint(0, 2**31 - 1)
-    payload = payloadify(
-        frame,
-        keychain,
-        flags=0,
-        id=id,
-        total_size=total_size,
-        sequence_number=sequence_number,
-        type=offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.BYTES,
-    )
-
-    writer.write(struct.pack(">I", len(payload)))
-    writer.write(payload)
-
-    finished = payloadify(
-        b"",
-        keychain,
-        flags=1,
-        id=id,
-        total_size=total_size,
-        sequence_number=sequence_number,
-        type=offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.BYTES,
-    )
-    writer.write(struct.pack(">I", len(finished)))
-    writer.write(finished)
-    await writer.drain()
-
-
-def payloadify(
+def _payloadify(
     frame: bytes,
     keychain: Keychain,
     *,
+    id: int,
+    flags: int,
+    type: offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.PayloadType,
+    file_name: str | None = None,
     offset: int = 0,
     total_size: int | None = None,
-    type: offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.PayloadType,
-    flags: int,
-    id: int,
     sequence_number: Callable[[], int],
-    file_name: str | None = None,
 ) -> bytes:
     # We're working from the inside out here
 
@@ -184,7 +257,7 @@ def payloadify(
     return secure_message.SerializeToString()
 
 
-def decrypt(
+def _decrypt(
     frame: securemessage_pb2.SecureMessage, keychain: Keychain
 ) -> offline_wire_formats_pb2.OfflineFrame:
     h = hmac.HMAC(keychain.receive_hmac_key, hashes.SHA256())
@@ -213,7 +286,7 @@ def decrypt(
     return payload_frame
 
 
-async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     start = time.perf_counter()
     ip, port = writer.get_extra_info("peername")
     nearby.debug("Connection from %s:%d", ip, port)
@@ -253,17 +326,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     )
     nearby.debug("Client %s is on OS %r", name, os)
 
-    connection_response = offline_wire_formats_pb2.OfflineFrame()
-    connection_response.version = offline_wire_formats_pb2.OfflineFrame.V1
-    connection_response.v1.type = offline_wire_formats_pb2.V1Frame.CONNECTION_RESPONSE
-    connection_response.v1.connection_response.status = 0
-    connection_response.v1.connection_response.response = (
-        offline_wire_formats_pb2.ConnectionResponseFrame.ACCEPT
-    )
-    connection_response.v1.connection_response.os_info.type = (
-        offline_wire_formats_pb2.OsInfo.LINUX  # 🐧
-    )
-    connection_response.v1.connection_response.multiplex_socket_bitmask = 0
+    connection_response = _generate_connection_response()
 
     data = connection_response.SerializeToString()
     writer.write(struct.pack(">I", len(data)))
@@ -272,29 +335,28 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
     # All messages on the wire are now encrypted
 
-    sequence_number = sequence_number_f()
+    sequence_number = _make_sequence_number()
 
-    async def send(payload: bytes) -> None:
-        await send_simple(payload, writer, keychain, sequence_number)
+    send = _make_send(writer, keychain, sequence_number)
 
     nearby.debug("Connection established with %r", name)
 
     # ¯\_(ツ)_/¯
-    paired_key_encryption = make_paired_key_encryption()
+    paired_key_encryption = _generate_paired_key_encryption()
     await send(paired_key_encryption.SerializeToString())
 
     await writer.drain()
 
     nearby.debug("Sent PAIRED_KEY_ENCRYPTION")
 
-    keep_alive_task = asyncio.create_task(keep_alive(send))
+    keep_alive_task = asyncio.create_task(_keep_alive(send))
 
     received_files = 0
     expected_files = -1
     receive_mode: ReceiveMode | None = None
     expected_payload_ids: list[int] = []
 
-    async for payload_header, data in payload_messages(reader, keychain):
+    async for payload_header, data in _iter_payload_messages(reader, keychain):
         if payload_header.id in expected_payload_ids:
             expected_payload_ids.remove(payload_header.id)
 
@@ -338,14 +400,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                         for m in wire_frame.v1.introduction.wifi_credentials_metadata
                     )
 
-                    accept = wire_format_pb2.Frame()
-                    accept.v1.type = wire_format_pb2.V1Frame.RESPONSE
-                    accept.version = wire_format_pb2.Frame.V1
-                    accept.v1.connection_response.status = (
-                        wire_format_pb2.ConnectionResponseFrame.ACCEPT
-                    )
+                    await send(_generate_accept())
 
-                    await send(accept.SerializeToString())
                 elif wire_frame.v1.introduction.file_metadata:
                     receive_mode = ReceiveMode.FILES
                     expected_files = len(wire_frame.v1.introduction.file_metadata)
@@ -360,20 +416,14 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                         m.payload_id for m in wire_frame.v1.introduction.file_metadata
                     )
 
-                    accept = wire_format_pb2.Frame()
-                    accept.v1.type = wire_format_pb2.V1Frame.RESPONSE
-                    accept.version = wire_format_pb2.Frame.V1
-                    accept.v1.connection_response.status = (
-                        wire_format_pb2.ConnectionResponseFrame.ACCEPT
-                    )
-
-                    await send(accept.SerializeToString())
+                    await send(_generate_accept())
                 else:
                     nearby.debug("Received unknown frame %d", payload_header.id)
             else:
                 nearby.debug("Received unknown frame %d", payload_header.id)
 
-        if len(expected_payload_ids) == 0 and receive_mode is not None:
+        if not expected_payload_ids and receive_mode is not None:
+            # We've received all attachments we were expecting
             break
 
     duration = time.perf_counter() - start
@@ -391,47 +441,14 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         await keep_alive_task
 
 
-async def socket_server():
+async def _socket_server():
     # TODO: automatically pick a port, instead of hardcoding
-    server = await asyncio.start_server(handle_client, "0.0.0.0", 12345)
+    server = await asyncio.start_server(_handle_client, "0.0.0.0", 12345)
 
     await server.serve_forever()
 
 
-async def receive_entrypoint() -> None:
-    """Receive something over QuickShare. Runs forever.
-
-    This function registers an mDNS service and opens a socket server to receive data.
-    """
-    info = make_service(
-        endpoint_id=make_enpoint_id(),
-        visible=True,
-        type=Type.phone,
-        name=NAME.encode("utf-8"),
-    )
-    services = [info]
-
-    task = asyncio.create_task(socket_server())
-
-    runner = IPV4Runner()
-    try:
-        await runner.register_services(services)
-    except KeyboardInterrupt:
-        await runner.unregister_services(services)
-        task.cancel()
-        await task
-
-
-async def send_entrypoint(file: str) -> None:
-    """Send something over QuickShare. Picks the first discovered service and sends data to it."""
-    services = await discover_services()
-
-    first = await services.get()
-
-    return await send_to(first, file=file)
-
-
-async def payload_messages(
+async def _iter_payload_messages(
     reader: asyncio.StreamReader, keychain: Keychain
 ) -> AsyncIterator[
     tuple[offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader, bytes]
@@ -445,7 +462,7 @@ async def payload_messages(
         secure_message = securemessage_pb2.SecureMessage()
         secure_message.ParseFromString(await read(reader))
 
-        original_frame = decrypt(secure_message, keychain)
+        original_frame = _decrypt(secure_message, keychain)
 
         if original_frame.v1.type == offline_wire_formats_pb2.V1Frame.DISCONNECTION:
             nearby.debug("Received DISCONNECTION")
@@ -481,38 +498,6 @@ async def payload_messages(
             yield original_header, payload
 
 
-def mime_to_type(mime_type: str) -> wire_format_pb2.FileMetadata.Type:
-    namespace = mime_type.split("/")[0]
-
-    if mime_type == "application/vnd.android.package-archive":
-        return wire_format_pb2.FileMetadata.APP
-    elif namespace == "audio":
-        return wire_format_pb2.FileMetadata.AUDIO
-    elif namespace == "image":
-        return wire_format_pb2.FileMetadata.IMAGE
-    elif namespace == "video":
-        return wire_format_pb2.FileMetadata.VIDEO
-    else:
-        return wire_format_pb2.FileMetadata.UNKNOWN
-
-
-def make_file_metadata(fp: str, id: int) -> wire_format_pb2.FileMetadata:
-    mime = magic.from_file(  # type: ignore
-        fp,
-        mime=True,
-    )
-    size = os.path.getsize(fp)
-    name = os.path.basename(fp)
-
-    return wire_format_pb2.FileMetadata(
-        name=name,
-        type=mime_to_type(mime),
-        mime_type=mime,
-        size=size,
-        payload_id=id,
-    )
-
-
 async def _send_file(
     *,
     file: str,
@@ -534,7 +519,7 @@ async def _send_file(
             if not chunk:
                 break
 
-            payload = payloadify(
+            payload = _payloadify(
                 chunk,
                 keychain,
                 flags=0,
@@ -551,7 +536,7 @@ async def _send_file(
 
             file_name = None
 
-        payload = payloadify(
+        payload = _payloadify(
             b"",
             keychain,
             flags=1,
@@ -597,18 +582,15 @@ async def send_to(service: AsyncServiceInfo, *, file: str) -> None:
 
     reader, writer = await asyncio.open_connection(address, service.port)
 
-    endpoint_id = make_enpoint_id()
+    endpoint_id = _generate_enpoint_id()
 
     connection_request = offline_wire_formats_pb2.OfflineFrame()
     connection_request.version = offline_wire_formats_pb2.OfflineFrame.V1
     connection_request.v1.type = offline_wire_formats_pb2.V1Frame.CONNECTION_REQUEST
     connection_request.v1.connection_request.endpoint_name = socket.gethostname()
     connection_request.v1.connection_request.endpoint_id = endpoint_id.decode("ascii")
-    connection_request.v1.connection_response.os_info.type = (
-        offline_wire_formats_pb2.OsInfo.LINUX  # 🐧 again
-    )
     connection_request.v1.connection_request.endpoint_info = bytes(
-        make_n(visible=True, type=Type.tablet, name="pyquickshare".encode("utf-8"))
+        make_n(visible=True, type=Type.tablet, name=NAME.encode("utf-8"))
     )
     connection_request.v1.connection_request.mediums.append(
         offline_wire_formats_pb2.ConnectionRequestFrame.WIFI_LAN
@@ -625,16 +607,7 @@ async def send_to(service: AsyncServiceInfo, *, file: str) -> None:
         # the server failed the key exchange at some point
         return
 
-    connection_response = offline_wire_formats_pb2.OfflineFrame()
-    connection_response.version = offline_wire_formats_pb2.OfflineFrame.V1
-    connection_response.v1.type = offline_wire_formats_pb2.V1Frame.CONNECTION_RESPONSE
-    connection_response.v1.connection_response.status = 0
-    connection_response.v1.connection_response.response = (
-        offline_wire_formats_pb2.ConnectionResponseFrame.ACCEPT
-    )
-    connection_response.v1.connection_response.os_info.type = (
-        offline_wire_formats_pb2.OsInfo.LINUX  # 🐧
-    )
+    connection_response = _generate_connection_response()
     data = connection_response.SerializeToString()
     writer.write(struct.pack(">I", len(data)))
     writer.write(data)
@@ -646,12 +619,10 @@ async def send_to(service: AsyncServiceInfo, *, file: str) -> None:
     peer_connection_response.ParseFromString(data)
 
     # Everything on the wire is now encrypted
-    sequence_number = sequence_number_f()
+    sequence_number = _make_sequence_number()
+    send = _make_send(writer, keychain, sequence_number)
 
-    async def send(payload: bytes, *, id: int | None = None) -> None:
-        await send_simple(payload, writer, keychain, sequence_number, id=id)
-
-    paired_key_encryption = make_paired_key_encryption()
+    paired_key_encryption = _generate_paired_key_encryption()
     await send(paired_key_encryption.SerializeToString())
 
     data = await read(reader)
@@ -659,9 +630,9 @@ async def send_to(service: AsyncServiceInfo, *, file: str) -> None:
     secure_message = securemessage_pb2.SecureMessage()
     secure_message.ParseFromString(data)
 
-    _peer_paired_key_encryption = decrypt(secure_message, keychain)
+    _peer_paired_key_encryption = _decrypt(secure_message, keychain)
 
-    task = asyncio.create_task(keep_alive(send))
+    task = asyncio.create_task(_keep_alive(send))
 
     paired_key_result = wire_format_pb2.Frame()
     paired_key_result.v1.type = wire_format_pb2.V1Frame.PAIRED_KEY_RESULT
@@ -673,7 +644,7 @@ async def send_to(service: AsyncServiceInfo, *, file: str) -> None:
     await send(paired_key_result.SerializeToString())
 
     id = random.randint(0, 2**31 - 1)
-    meta = make_file_metadata(file, id)
+    meta = _generate_file_metadata(file, id)
     introduction_frame = wire_format_pb2.Frame()
     introduction_frame.v1.type = wire_format_pb2.V1Frame.INTRODUCTION
     introduction_frame.version = wire_format_pb2.Frame.V1
@@ -681,7 +652,7 @@ async def send_to(service: AsyncServiceInfo, *, file: str) -> None:
     introduction_frame.v1.introduction.file_metadata.append(meta)
     await send(introduction_frame.SerializeToString())
 
-    async for payload_header, data in payload_messages(reader, keychain):
+    async for payload_header, data in _iter_payload_messages(reader, keychain):
         wire_frame = wire_format_pb2.Frame()
         wire_frame.ParseFromString(data)
 
@@ -712,10 +683,32 @@ async def send_to(service: AsyncServiceInfo, *, file: str) -> None:
         await task
 
 
-def make_paired_key_encryption():
-    paired_key_encryption = wire_format_pb2.Frame()
-    paired_key_encryption.v1.type = wire_format_pb2.V1Frame.PAIRED_KEY_ENCRYPTION
-    paired_key_encryption.version = wire_format_pb2.Frame.V1
-    paired_key_encryption.v1.paired_key_encryption.secret_id_hash = bytes([0x00] * 6)  # fmt: off
-    paired_key_encryption.v1.paired_key_encryption.signed_data = bytes([0x00] * 72)
-    return paired_key_encryption
+async def receive() -> None:
+    """Receive something over QuickShare. Runs forever.
+
+    This function registers an mDNS service and opens a socket server to receive data.
+    """
+    info = make_service(
+        endpoint_id=_generate_enpoint_id(),
+        visible=True,
+        type=Type.phone,
+        name=NAME.encode("utf-8"),
+    )
+    services = [info]
+
+    task = asyncio.create_task(_socket_server())
+
+    runner = IPV4Runner()
+    try:
+        await runner.register_services(services)
+    except KeyboardInterrupt:
+        await runner.unregister_services(services)
+        task.cancel()
+        await task
+
+
+async def discover_services() -> AsyncIterator[AsyncServiceInfo]:
+    """Discover services on the network."""
+    queue = await _discover_services()
+    while True:
+        yield await queue.get()

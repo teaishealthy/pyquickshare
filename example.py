@@ -8,6 +8,12 @@ import pyquickshare
 basicConfig(level=DEBUG)
 
 
+async def send(file: str) -> None:
+    first = await anext(pyquickshare.discover_services())
+
+    return await pyquickshare.send_to(first, file=file)
+
+
 async def main(argv: list[str]) -> None:
     if len(argv) < 2:
         print("Usage: example.py <mode> [args...]")
@@ -17,9 +23,9 @@ async def main(argv: list[str]) -> None:
         if len(argv) < 3:
             print("Usage: example.py send <file>")
             return
-        await pyquickshare.send_entrypoint(argv[2])
+        await send(argv[2])
     elif argv[1] == "receive":
-        await pyquickshare.receive_entrypoint()
+        await pyquickshare.receive()
     else:
         print("Unknown mode:", argv[1])
 
