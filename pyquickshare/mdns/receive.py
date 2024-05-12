@@ -71,7 +71,11 @@ def make_service(
     _name = to_url64(make_service_name(endpoint_id))
     n = make_n(visible=visible, type=type, name=name)
 
-    ip = "192.168.0.141"
+    # Get's system's local IP address.
+    ip_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    ip_socket.connect(("8.8.8.8", 80)) # All this does is open a socket. It doesn't send any data. The route doesn't have to be "8.8.8.8".
+
+    ip = ip_socket.getsockname()[0]
 
     info = AsyncServiceInfo(
         "_FC9F5ED42C8A._tcp.local.",
