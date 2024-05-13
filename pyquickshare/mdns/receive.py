@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import random
 import socket
 from logging import getLogger
@@ -71,7 +72,11 @@ def make_service(
     _name = to_url64(make_service_name(endpoint_id))
     n = make_n(visible=visible, type=type, name=name)
 
-    ip = "192.168.0.141"
+    ip = os.environ.get("QUICKSHARE_IP")
+
+    if ip is None:
+        ip = socket.gethostbyname(socket.gethostname())
+        print("QUICKSHARE_IP not set, using", ip)
 
     info = AsyncServiceInfo(
         "_FC9F5ED42C8A._tcp.local.",
