@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ctypes
 import enum
 import io
+import math
 import os
 import random
 import socket
@@ -45,15 +47,29 @@ __all__ = (
 )
 
 
+def to_pin(bytes_: bytes) -> str:
+    k_hash_modulo = 9973
+    k_hash_base_multiplier = 31
+
+    hash = 0
+    multiplier = 1
+    for byte in struct.unpack("b" * len(bytes_), bytes_):
+        # % in python is real mod, not remainder, unlike in C++ (worst bug i ever had to debug)
+        hash = int(math.fmod((hash + byte * multiplier), k_hash_modulo))
+        multiplier = int(math.fmod((multiplier * k_hash_base_multiplier), k_hash_modulo))
+
+    return "{:04d}".format(abs(hash))
+
 class ShareRequest:
     def __init__(
-        self, header: offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader
+        self, header: offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader, pin: str
     ):
         self.response: asyncio.Future[bool] = asyncio.Future()
         self.done: asyncio.Future[list[Result]] = asyncio.Future()
         self.header: offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader = (
             header
         )
+        self.pin: str = pin
 
     async def accept(self) -> list[Result]:
         self.response.set_result(True)
@@ -450,7 +466,7 @@ async def _handle_client(
             elif wire_frame.v1.type == wire_format_pb2.V1Frame.INTRODUCTION:
                 if wire_frame.v1.introduction.wifi_credentials_metadata:
                     receive_mode = ReceiveMode.WIFI
-                    request = ShareRequest(payload_header)
+                    request = ShareRequest(payload_header, to_pin(keychain.auth_string))
                     await requests.put(request)
                     nearby.debug(
                         "Receiving wifi credentials for ssids %r",
@@ -471,7 +487,7 @@ async def _handle_client(
 
                 elif wire_frame.v1.introduction.file_metadata:
                     receive_mode = ReceiveMode.FILES
-                    request = ShareRequest(payload_header)
+                    request = ShareRequest(payload_header, to_pin(keychain.auth_string))
                     await requests.put(request)
                     result = await request.response
 
@@ -499,7 +515,7 @@ async def _handle_client(
                     await send(_generate_accept())
                 elif wire_frame.v1.introduction.text_metadata:
                     receive_mode = ReceiveMode.TEXT
-                    request = ShareRequest(payload_header)
+                    request = ShareRequest(payload_header, to_pin(keychain.auth_string))
                     await requests.put(request)
                     nearby.debug("Receiving text")
                     expected_payload_ids.update(

@@ -30,6 +30,7 @@ class Keychain(typing.NamedTuple):
     receive_hmac_key: bytes
     encrypt_key: bytes
     send_hmac_key: bytes
+    auth_string: bytes
 
 
 def to_twos_complement(n: int) -> bytes:
@@ -202,6 +203,13 @@ def derive_keys(
         info=m1 + m2,
     ).derive(dhs)
 
+    auth_string = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=b"UKEY2 v1 auth",
+        info=m1 + m2,
+    ).derive(dhs)
+
     d2d_server_key = HKDF(
         algorithm=hashes.SHA256(),
         length=32,
@@ -252,6 +260,7 @@ def derive_keys(
         receive_hmac_key=receive_hmac_key,
         encrypt_key=encrypt_key,
         send_hmac_key=send_hmac_key,
+        auth_string=auth_string,
     )
 
 
@@ -262,6 +271,7 @@ def swap_keychain(keychain: Keychain) -> Keychain:
         receive_hmac_key=keychain.send_hmac_key,
         encrypt_key=keychain.decrypt_key,
         send_hmac_key=keychain.receive_hmac_key,
+        auth_string=keychain.auth_string,
     )
 
 
