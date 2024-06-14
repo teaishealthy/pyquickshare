@@ -3,16 +3,36 @@ from __future__ import annotations
 
 import asyncio
 import os
+import pathlib
 import random
 import socket
+from contextlib import closing, suppress
 from logging import getLogger
 
+import ifaddr
 from zeroconf import IPVersion
 from zeroconf.asyncio import AsyncServiceInfo, AsyncZeroconf
 
 from ..common import VERSION, Type, to_url64
 
 logger = getLogger(__name__)
+
+
+BASE_PATH = pathlib.Path("/sys/class/net")
+
+
+def get_interfaces() -> list[str]:
+    interfaces: list[str] = []
+    for ifa in BASE_PATH.iterdir():
+        carrier = ifa.joinpath("carrier")
+        with suppress(OSError):
+            if (
+                "/devices/virtual/net/" not in ifa.resolve().as_posix()
+                and carrier.exists()
+                and carrier.read_text().strip() == "1"
+            ):
+                interfaces.append(ifa.name)
+    return interfaces
 
 
 class IPV4Runner:
@@ -68,23 +88,36 @@ def make_n(*, visible: bool, type: Type, name: bytes) -> bytearray:
 
 def make_service(
     *, visible: bool, type: Type, name: bytes, endpoint_id: bytes
-) -> AsyncServiceInfo:
+) -> tuple[int, AsyncServiceInfo]:
     _name = to_url64(make_service_name(endpoint_id))
     n = make_n(visible=visible, type=type, name=name)
 
-    ip = os.environ.get("QUICKSHARE_IP")
+    ips: list[str]
 
+    ip = os.environ.get("QUICKSHARE_IP")
     if ip is None:
-        ip = socket.gethostbyname(socket.gethostname())
-        print("QUICKSHARE_IP not set, using", ip)
+        interfaces = get_interfaces()
+        ips = []
+        for adapter in ifaddr.get_adapters():
+            if adapter.name in interfaces:
+                ips.extend(str(ip.ip) for ip in adapter.ips)
+
+        logger.debug("QUICKSHARE_IP not set, using: %s", ", ".join(ips))
+    else:
+        ips = [ip]
+
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_DGRAM)) as sock:
+        sock.bind(("0.0.0.0", 0))
+        _, port = sock.getsockname()
+
+    logger.debug("Using port %d", port)
 
     info = AsyncServiceInfo(
         "_FC9F5ED42C8A._tcp.local.",
         f"{_name}._FC9F5ED42C8A._tcp.local.",
-        port=12345,
+        port=port,
+        parsed_addresses=ips,
         properties={"n": to_url64(n)},
-        addresses=[socket.inet_aton(ip)],
-        server="",
     )
 
-    return info
+    return port, info

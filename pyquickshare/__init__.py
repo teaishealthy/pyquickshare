@@ -534,12 +534,11 @@ async def _handle_client(
         await keep_alive_task
 
 
-async def _socket_server(requests: asyncio.Queue[ShareRequest]) -> None:
-    # TODO: automatically pick a port, instead of hardcoding
+async def _socket_server(port: int, requests: asyncio.Queue[ShareRequest]) -> None:
     server = await asyncio.start_server(
         lambda reader, writer: _handle_client(requests, reader, writer),
         "0.0.0.0",
-        12345,
+        port,
     )
 
     await server.serve_forever()
@@ -673,7 +672,18 @@ async def send_to(service: AsyncServiceInfo, *, file: str) -> None:
 
     nearby.debug("Endpoint %r has name %r and type %r", peer_endpoint_id, name, type)
 
-    address = socket.inet_ntoa(service.addresses[0])
+    address: str | None = None
+    for addr in service.addresses:
+        try:
+            address = socket.inet_ntoa(addr)
+            socket.gethostbyaddr(address)
+            break
+        except socket.herror:
+            nearby.debug("Address %r is not resolvable", address)
+
+    if address is None:
+        nearby.debug("No resolvable addresses found, aborting")
+        return
 
     nearby.debug("Connecting to %s:%d", address, service.port)
 
@@ -785,7 +795,7 @@ async def receive() -> AsyncIterator[ShareRequest,]:
 
     This function registers an mDNS service and opens a socket server to receive data.
     """
-    info = make_service(
+    port, info = make_service(
         endpoint_id=_generate_enpoint_id(),
         visible=True,
         type=Type.phone,
@@ -794,7 +804,7 @@ async def receive() -> AsyncIterator[ShareRequest,]:
     services = [info]
     result: asyncio.Queue[ShareRequest] = asyncio.Queue()
 
-    create_task(_socket_server(result))
+    create_task(_socket_server(port, result))
     create_task(_start_mdns_service(services))
 
     while True:
