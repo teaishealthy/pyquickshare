@@ -19,11 +19,22 @@ This is done by adding a temporary rule to the currently "active" zone.
 This rule is automatically removed by `firewalld` after 5 minutes.
 
 Communication with `firewalld` is done over D-Bus, `polkit` may prompt for authentication.
+
 ## Installation
 
 ```bash
 poetry install
 ```
+
+## Features
+
+Receive is fully implemented, namely WiFi credentials, files, and text. Sending only supports files, but support for sending text and WiFi credentials is planned.
+
+### Transfer
+Only LAN/Wifi is supported at the moment, but Bluetooth is planned.
+
+### Discovery
+pyquickshare uses mDNS to discover other devices on the local network. BLE is only used to trigger advertisment at the moment.
 
 ## Usage
 
