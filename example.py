@@ -25,6 +25,10 @@ async def main(argv: list[str]) -> None:
             return
         await send(argv[2])
     elif argv[1] == "receive":
+        # if you want to appear like different devices, you can change the endpoint_id like this:
+        # asnyc for request in pyquickshare.receive(endpoint_id=b"1234"):
+        # (the endpoint_id must be 4 bytes long, you can use pyquickshare.generate_enpoint_id())
+
         async for request in pyquickshare.receive():
             results = await request.accept()
             print(results)

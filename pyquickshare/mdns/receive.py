@@ -9,11 +9,13 @@ import socket
 from contextlib import closing, suppress
 from logging import getLogger
 
+import dbus_next
 import ifaddr
 from zeroconf import IPVersion
 from zeroconf.asyncio import AsyncServiceInfo, AsyncZeroconf
 
-from ..common import VERSION, Type, to_url64
+from ..common import Type, to_url64
+from ..firewalld import temporarily_open_port
 
 logger = getLogger(__name__)
 
@@ -33,6 +35,12 @@ def get_interfaces() -> list[str]:
             ):
                 interfaces.append(ifa.name)
     return interfaces
+
+
+def get_interface_mac(interface: str) -> bytes:
+    mac_path = BASE_PATH / interface / "address"
+
+    return bytes.fromhex(mac_path.read_text().strip().replace(":", ""))
 
 
 class IPV4Runner:
@@ -86,29 +94,46 @@ def make_n(*, visible: bool, type: Type, name: bytes) -> bytearray:
     return n
 
 
-def make_service(
-    *, visible: bool, type: Type, name: bytes, endpoint_id: bytes
+async def make_service(
+    *, visible: bool, type_: Type, name: bytes, endpoint_id: bytes
 ) -> tuple[int, AsyncServiceInfo]:
     _name = to_url64(make_service_name(endpoint_id))
-    n = make_n(visible=visible, type=type, name=name)
+    n = make_n(visible=visible, type=type_, name=name)
 
-    ips: list[str]
+    ips: list[str] = []
 
     ip = os.environ.get("QUICKSHARE_IP")
+    used_interfaces: set[str] = set()
+
     if ip is None:
         interfaces = get_interfaces()
-        ips = []
         for adapter in ifaddr.get_adapters():
-            if adapter.name in interfaces:
-                ips.extend(str(ip.ip) for ip in adapter.ips)
+            if adapter.name not in interfaces:
+                continue
+
+            used_interfaces.add(adapter.name)
+            ips.extend(str(ip.ip) for ip in adapter.ips if isinstance(ip.ip, str))
 
         logger.debug("QUICKSHARE_IP not set, using: %s", ", ".join(ips))
     else:
-        ips = [ip]
+        ips.append(ip)
 
     with closing(socket.socket(socket.AF_INET, socket.SOCK_DGRAM)) as sock:
         sock.bind(("0.0.0.0", 0))
         _, port = sock.getsockname()
+
+    try:
+        for interface in used_interfaces:
+            await temporarily_open_port(interface, port)
+    except dbus_next.errors.DBusError as e:
+        if e.text == "The name is not activatable":
+            logger.error(
+                "Failed to open port %d. Are you using firewalld? "
+                "You may need to manually open the port on your firewall.",
+                port,
+            )
+    except Exception:
+        logger.exception("Failed to open port %d. Are you using firewalld?", port)
 
     logger.debug("Using port %d", port)
 

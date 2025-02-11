@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import ctypes
 import enum
+import hashlib
 import io
 import math
 import os
@@ -20,7 +20,13 @@ from cryptography.hazmat.primitives import hashes, hmac, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from .common import Type, create_task, from_url64, read, safe_assert
-from .mdns.receive import IPV4Runner, make_n, make_service
+from .mdns.receive import (
+    IPV4Runner,
+    get_interface_mac,
+    get_interfaces,
+    make_n,
+    make_service,
+)
 from .mdns.send import discover_services as _discover_services
 from .protos import (
     device_to_device_messages_pb2,
@@ -43,6 +49,7 @@ if TYPE_CHECKING:
 
 __all__ = (
     "send_to",
+    "generate_enpoint_id",
     "receive",
 )
 
@@ -56,15 +63,20 @@ def to_pin(bytes_: bytes) -> str:
     for byte in struct.unpack("b" * len(bytes_), bytes_):
         # % in python is real mod, not remainder, unlike in C++ (worst bug i ever had to debug)
         hash = int(math.fmod((hash + byte * multiplier), k_hash_modulo))
-        multiplier = int(math.fmod((multiplier * k_hash_base_multiplier), k_hash_modulo))
+        multiplier = int(
+            math.fmod((multiplier * k_hash_base_multiplier), k_hash_modulo)
+        )
 
     return "{:04d}".format(abs(hash))
 
+
 class ShareRequest:
     def __init__(
-        self, header: offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader, pin: str
+        self,
+        header: offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader,
+        pin: str,
     ):
-        self.response: asyncio.Future[bool] = asyncio.Future()
+        self.respond: asyncio.Future[bool] = asyncio.Future()
         self.done: asyncio.Future[list[Result]] = asyncio.Future()
         self.header: offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader = (
             header
@@ -72,11 +84,11 @@ class ShareRequest:
         self.pin: str = pin
 
     async def accept(self) -> list[Result]:
-        self.response.set_result(True)
+        self.respond.set_result(True)
         return await self.done
 
     async def reject(self) -> None:
-        self.response.set_result(False)
+        self.respond.set_result(False)
         await self.done
 
 
@@ -84,6 +96,15 @@ class ReceiveMode(enum.Enum):
     WIFI = 1
     FILES = 2
     TEXT = 3
+
+
+def parse_n(n: bytes) -> tuple[bool, Type, str]:
+    n = from_url64(n.decode("utf-8"))
+    flags = n[0]
+    visible = bool(flags & 0b00000001)
+    type = Type(flags >> 1 & 0b00000111)
+    name = n[18:].decode("utf-8")
+    return visible, type, name
 
 
 def _mime_to_type(mime_type: str) -> wire_format_pb2.FileMetadata.Type:
@@ -149,18 +170,34 @@ def _make_send(
     return send
 
 
-def _generate_enpoint_id() -> bytes:
+def generate_enpoint_id() -> bytes:
+    """Generates a random 4-byte endpoint ID
+
+    Returns:
+        bytes: The generated endpoint ID
+    """
     # 4-byte alphanum
     return "".join(random.choices(string.ascii_letters + string.digits, k=4)).encode(
         "ascii"
     )
 
 
+def _derive_endpoint_id_from_mac(mac: bytes) -> bytes:
+    return bytes(i & 0b0111111 for i in hashlib.blake2b(mac, digest_size=4).digest())
+
+
+def _pick_mac_deterministically(interfaces: list[str]) -> bytes:
+    (interface,) = sorted(interfaces)
+    return get_interface_mac(interface)
+
+
 def _generate_paired_key_encryption():
     paired_key_encryption = wire_format_pb2.Frame()
     paired_key_encryption.v1.type = wire_format_pb2.V1Frame.PAIRED_KEY_ENCRYPTION
     paired_key_encryption.version = wire_format_pb2.Frame.V1
-    paired_key_encryption.v1.paired_key_encryption.secret_id_hash = bytes([0x00] * 6)  # fmt: off
+    paired_key_encryption.v1.paired_key_encryption.secret_id_hash = bytes(
+        [0x00] * 6
+    )  # fmt: off
     paired_key_encryption.v1.paired_key_encryption.signed_data = bytes([0x00] * 72)
     return paired_key_encryption
 
@@ -489,7 +526,7 @@ async def _handle_client(
                     receive_mode = ReceiveMode.FILES
                     request = ShareRequest(payload_header, to_pin(keychain.auth_string))
                     await requests.put(request)
-                    result = await request.response
+                    result = await request.respond
 
                     nearby.debug(
                         "%r wants to send %r",
@@ -698,14 +735,16 @@ async def send_to(service: AsyncServiceInfo, *, file: str) -> None:
             nearby.debug("Address %r is not resolvable", address)
 
     if address is None:
-        nearby.debug("No resolvable addresses found, aborting")
+        nearby.error("No resolvable addresses found, aborting")
         return
 
     nearby.debug("Connecting to %s:%d", address, service.port)
 
     reader, writer = await asyncio.open_connection(address, service.port)
 
-    endpoint_id = _generate_enpoint_id()
+    endpoint_id = _derive_endpoint_id_from_mac(
+        _pick_mac_deterministically(get_interfaces())
+    )
 
     connection_request = offline_wire_formats_pb2.OfflineFrame()
     connection_request.version = offline_wire_formats_pb2.OfflineFrame.V1
@@ -755,7 +794,7 @@ async def send_to(service: AsyncServiceInfo, *, file: str) -> None:
 
     _peer_paired_key_encryption = _decrypt(secure_message, keychain)
 
-    task = asyncio.create_task(_keep_alive(send))
+    task = create_task(_keep_alive(send))
 
     paired_key_result = wire_format_pb2.Frame()
     paired_key_result.v1.type = wire_format_pb2.V1Frame.PAIRED_KEY_RESULT
@@ -806,15 +845,21 @@ async def send_to(service: AsyncServiceInfo, *, file: str) -> None:
         await task
 
 
-async def receive() -> AsyncIterator[ShareRequest,]:
+async def receive(*, endpoint_id: bytes | None = None) -> AsyncIterator[ShareRequest,]:
     """Receive something over QuickShare. Runs forever.
 
     This function registers an mDNS service and opens a socket server to receive data.
+    If firewalld is available, it temporarily reconfigures firewalld to allow incoming connections on the port.
     """
-    port, info = make_service(
-        endpoint_id=_generate_enpoint_id(),
+
+    if endpoint_id and len(endpoint_id) != 4:
+        raise ValueError("endpoint_id must be 4 bytes (and in ASCII)")
+
+    port, info = await make_service(
+        endpoint_id=endpoint_id
+        or _derive_endpoint_id_from_mac(_pick_mac_deterministically(get_interfaces())),
         visible=True,
-        type=Type.phone,
+        type_=Type.phone,
         name=NAME.encode("utf-8"),
     )
     services = [info]

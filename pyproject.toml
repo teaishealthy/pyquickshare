@@ -12,8 +12,8 @@ zeroconf = "^0.132.2"
 protobuf = "^5.26.1"
 cryptography = "^42.0.7"
 bless = "^0.2.6"
-dbus-python = "^1.3.2"
 python-magic = "^0.4.27"
+dbus-next = "^0.2.3"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.4.3"

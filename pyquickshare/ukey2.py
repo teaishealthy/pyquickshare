@@ -338,14 +338,13 @@ async def do_client_key_exchange(
     ukey_client_init = ukey_pb2.Ukey2ClientInit()
     ukey_client_init.version = 1
     ukey_client_init.random = os.urandom(32)
-    ukey_client_init.next_protocol = "AES_256_CBC-HMAC_SHA256"
+    ukey_client_init.next_protocol = "AES_256_CBC-HMAC_SHA256"  # FIXME: hardcoded
     ukey_client_init.cipher_commitments.append(
         ukey_pb2.Ukey2ClientInit.CipherCommitment(
             handshake_cipher=ukey_pb2.P256_SHA512,
             commitment=hashlib.sha512(serialized_ukey_client_finished_framed).digest(),
         )
     )
-    ukey_client_init.next_protocol = "AES_256_CBC-HMAC_SHA256"  # FIXME: hardcoded
 
     message_framing = ukey_pb2.Ukey2Message()
     message_framing.message_type = ukey_pb2.Ukey2Message.CLIENT_INIT

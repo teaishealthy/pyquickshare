@@ -15,6 +15,8 @@ from zeroconf.asyncio import (
     AsyncZeroconf,
 )
 
+from ..common import create_task
+
 SERVICE_UUID = "FE2C"
 SERVICE_DATA = binascii.unhexlify("fc128e0142000000000000000000")
 
@@ -101,12 +103,12 @@ async def trigger_devices():
 
 
 async def discover_services(timeout: float = 10) -> asyncio.Queue[AsyncServiceInfo]:
-    task = asyncio.create_task(trigger_devices())
+    task = create_task(trigger_devices())
     _tasks.append(task)
 
     runner = AsyncRunner()
 
-    task = asyncio.create_task(runner.async_run())
+    task = create_task(runner.async_run())
     _tasks.append(task)
 
     return runner.result
