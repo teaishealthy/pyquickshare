@@ -7,12 +7,12 @@ requires-python = "~=3.10"
 readme = "README.md"
 license = "MIT"
 dependencies = [
-    "zeroconf>=0.132.2,<0.133",
-    "protobuf>=5.26.1,<6",
-    "cryptography>=42.0.7,<43",
-    "bless>=0.2.6,<0.3",
-    "python-magic>=0.4.27,<0.5",
-    "dbus-next>=0.2.3,<0.3",
+    "bless>=0.2.6",
+    "cryptography>=42.0.8",
+    "dbus-next>=0.2.3",
+    "protobuf>=5.26.1",
+    "python-magic>=0.4.27",
+    "zeroconf>=0.143.0",
 ]
 
 [dependency-groups]
