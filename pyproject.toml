@@ -1,23 +1,23 @@
-[tool.poetry]
+[project]
 name = "pyquickshare"
 version = "0.1.0"
 description = ""
-authors = ["teaishealthy <teaishealthy@protonmail.com>"]
-license = "MIT"
+authors = [{ name = "teaishealthy", email = "teaishealthy@protonmail.com" }]
+requires-python = "~=3.10"
 readme = "README.md"
+license = "MIT"
+dependencies = [
+    "zeroconf>=0.132.2,<0.133",
+    "protobuf>=5.26.1,<6",
+    "cryptography>=42.0.7,<43",
+    "bless>=0.2.6,<0.3",
+    "python-magic>=0.4.27,<0.5",
+    "dbus-next>=0.2.3,<0.3",
+]
 
-[tool.poetry.dependencies]
-python = "^3.10"
-zeroconf = "^0.132.2"
-protobuf = "^5.26.1"
-cryptography = "^42.0.7"
-bless = "^0.2.6"
-python-magic = "^0.4.27"
-dbus-next = "^0.2.3"
-
-[tool.poetry.group.dev.dependencies]
-ruff = "^0.4.3"
+[dependency-groups]
+dev = ["ruff>=0.4.3,<0.5"]
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
