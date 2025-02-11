@@ -50,7 +50,12 @@ poetry run python example.py send <file>
 ```
 
 
-## Notes
+## Notes and Acknowledgements
+
+The code in [`pyquickshare/protos`](pyquickshare/protos) is generated from protobuf sources licensed under Apache 2.0.
+As a derivative work, these generated files remain under the original Apache 2.0 license.
+A copy of the original license can be found in the [`pyquickshare/protos`](pyquickshare/protos) directory.
+
 
 This project would not have been possible without the amazing reverse engineering work done by [grishka](https://github.com/grishka/) on the QuickShare protocol.
 Check out [NearDrop](https://github.com/grishka/NearDrop/), a similar project for Mac OS.
