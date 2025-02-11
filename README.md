@@ -5,8 +5,8 @@ An implementation of QuickShare in Python.
 ## System requirements
 
 pyquickshare has following expectations from the system:
-- Bluetooth stack using BlueZ
-- BlueZ reachable over D-Bus
+- some mDNS implementation (avahi, systemd-resolved, etc.)
+- Bluetooth stack using BlueZ reachable via D-Bus
 
 As these are de-facto standards on Linux, pyquickshare should work on most Linux distributions.
 
