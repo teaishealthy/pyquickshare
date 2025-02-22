@@ -61,7 +61,7 @@ class AsyncRunner:
     ) -> None:
         if state_change is not ServiceStateChange.Added:
             return
-        logger.debug("Discovered QuickShare service: %s", name)
+        logger.debug("Discovered Quick Share service: %s", name)
 
         # make sure this gets cleaned up properly
         tasks.append(
@@ -109,7 +109,7 @@ async def trigger_devices() -> None:
         {},
     )
 
-    bluetooth.debug("Advertising QuickShare service")
+    bluetooth.debug("Advertising Quick Share service")
 
     # Wait forever, BlueZ keeps advertising while the D-Bus connection is open
     await asyncio.Future()

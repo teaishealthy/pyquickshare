@@ -6,7 +6,7 @@
 ![Coveralls](https://img.shields.io/coverallsCoverage/github/teaishealthy/pyquickshare?style=flat-square)
 
 
-An implementation of QuickShare in Python.
+An implementation of Quick Share in Python.
 
 ## System requirements
 
@@ -18,7 +18,7 @@ As these are de-facto standards on Linux, pyquickshare should work on most Linux
 
 ### Firewalls
 
-As QuickShare uses a direct connection between devices, it is necessary to allow incoming connections on the advertised port. firewalld is supported out of the box (but not required).
+As Quick Share uses a direct connection between devices, it is necessary to allow incoming connections on the advertised port. firewalld is supported out of the box (but not required).
 
 pyquickshare temporarily reconfigures `firewalld` (if available) to accept an incoming connection on it's advertised port.
 This is done by adding a temporary rule to the currently "active" zone.
@@ -45,7 +45,7 @@ pyquickshare uses mDNS to discover other devices on the local network. BLE is on
 ## Usage
 
 **example.py** is a basic example of how to use pyquickshare.
-It provides a command line interface to send and receive files using QuickShare:
+It provides a command line interface to send and receive files using Quick Share:
 
 ```bash
 uv run example.py receive
@@ -63,5 +63,5 @@ As a derivative work, these generated files remain under the original Apache 2.0
 A copy of the original license can be found in the [`pyquickshare/protos`](pyquickshare/protos) directory.
 
 
-This project would not have been possible without the amazing reverse engineering work done by [grishka](https://github.com/grishka/) on the QuickShare protocol.
+This project would not have been possible without the amazing reverse engineering work done by [grishka](https://github.com/grishka/) on the Quick Share protocol.
 Check out [NearDrop](https://github.com/grishka/NearDrop/), a similar project for Mac OS.

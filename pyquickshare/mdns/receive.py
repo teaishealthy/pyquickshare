@@ -1,5 +1,5 @@
 # ruff: noqa: PGH003
-# the mDNS part of QuickShare
+# the mDNS part of Quick Share
 from __future__ import annotations
 
 import asyncio

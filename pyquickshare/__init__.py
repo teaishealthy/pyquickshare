@@ -854,7 +854,7 @@ async def _handle_target(  # noqa: PLR0915 # TODO: refactor
 
 
 async def receive(*, endpoint_id: bytes | None = None) -> AsyncIterator[ShareRequest,]:
-    """Receive something over QuickShare. Runs forever.
+    """Receive something over Quick Share. Runs forever.
 
     This function registers an mDNS service and opens a socket server to receive data.
     If firewalld is available, it temporarily reconfigures firewalld to allow incoming connections on the port.
