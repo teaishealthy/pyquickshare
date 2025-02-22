@@ -187,7 +187,7 @@ def _derive_endpoint_id_from_mac(mac: bytes) -> bytes:
 
 
 def _pick_mac_deterministically(interfaces: list[str]) -> bytes:
-    (interface,) = sorted(interfaces)
+    interface = sorted(interfaces)[0]
     return get_interface_mac(interface)
 
 
