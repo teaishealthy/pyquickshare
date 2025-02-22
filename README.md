@@ -29,7 +29,7 @@ Communication with `firewalld` is done over D-Bus, `polkit` may prompt for authe
 ## Installation
 
 ```bash
-poetry install
+uv install
 ```
 
 ## Features
@@ -48,11 +48,11 @@ pyquickshare uses mDNS to discover other devices on the local network. BLE is on
 It provides a command line interface to send and receive files using QuickShare:
 
 ```bash
-poetry run python example.py receive
+uv run example.py receive
 ```
 
 ```bash
-poetry run python example.py send <file>
+uv run example.py send <file>
 ```
 
 
