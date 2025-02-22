@@ -30,4 +30,7 @@ jobs:
 
       - name: Run tests
         run: |
-          uv run pytest
+          uv run pytest --cov=pyquickshare
+
+      - name: Coveralls
+        uses: coverallsapp/github-action@v2
