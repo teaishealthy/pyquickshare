@@ -16,7 +16,15 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["ruff>=0.4.3,<0.5"]
+dev = [
+    "pytest>=8.3.4",
+    "pytest-asyncio>=0.25.3",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.4.3,<0.5",
+]
+
+[tool.coverage.run]
+omit = ["pyquickshare/protos/*"]
 
 [build-system]
 requires = ["hatchling"]

@@ -607,9 +607,12 @@ async def _iter_payload_messages(
         int, offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader
     ] = {}
 
-    while True:
+    while not reader.at_eof():
         secure_message = securemessage_pb2.SecureMessage()
-        secure_message.ParseFromString(await read(reader))
+        try:
+            secure_message.ParseFromString(await read(reader))
+        except asyncio.IncompleteReadError:
+            break
 
         original_frame = _decrypt(secure_message, keychain)
 
@@ -742,6 +745,12 @@ async def send_to(service: AsyncServiceInfo, *, file: str) -> None:
 
     reader, writer = await asyncio.open_connection(address, service.port)
 
+    return await _handle_target(file, reader, writer)
+
+
+async def _handle_target(
+    file: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
     endpoint_id = _derive_endpoint_id_from_mac(
         _pick_mac_deterministically(get_interfaces())
     )
