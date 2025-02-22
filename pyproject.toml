@@ -20,8 +20,44 @@ dev = [
     "pytest>=8.3.4",
     "pytest-asyncio>=0.25.3",
     "pytest-cov>=6.0.0",
-    "ruff>=0.4.3,<0.5",
+    "ruff>=0.9.7",
 ]
+
+[tool.ruff]
+include = ["pyquickshare/*"]
+exclude = ["pyquickshare/protos/*"]
+line-length = 100
+
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "A001",   # variable shadowing a built-in
+    "A002",   # argument shadowing a built-in
+    "ANN401", # no Any
+
+    "TD002",
+    "TD003",
+    "FIX002",
+
+    "TID252", # i really dislike absolute imports
+
+    # these are disabled because i can't configure what 'public' means
+    "D100", # missing docstring in public module
+    "D101", # missing docstring in public class
+    "D102", # missing docstring in public method
+    "D103", # missing docstring in public function
+    "D107", # missing docstring in __init__
+
+    # disabled because of `ruff format`
+    "COM812",
+    "ISC001",
+]
+
+
+[tool.ruff.lint.pydocstyle]
+convention = "google" # Accepts: "google", "numpy", or "pep257".
+
 
 [tool.coverage.run]
 omit = ["pyquickshare/protos/*"]

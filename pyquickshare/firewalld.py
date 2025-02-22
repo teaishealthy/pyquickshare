@@ -13,7 +13,10 @@ __all__ = ("temporarily_open_port",)
 
 
 async def get_proxy_object(
-    bus: MessageBus, name: str, path: str, introspection: Any = None
+    bus: MessageBus,
+    name: str,
+    path: str,
+    introspection: Any = None,
 ) -> Any:
     if introspection is None:
         introspection = await bus.introspect(
@@ -28,7 +31,7 @@ async def get_proxy_object(
     )
 
 
-async def temporarily_open_port(interface: str, port: int = 8080):
+async def temporarily_open_port(interface: str, port: int = 8080) -> None:
     logger.info("Opening port %d for 5 minutes", port)
 
     logger.debug("Connecting to the system bus")
@@ -36,7 +39,9 @@ async def temporarily_open_port(interface: str, port: int = 8080):
     logger.info("Connected to the system bus")
 
     firewalld_root = await get_proxy_object(
-        bus, "org.fedoraproject.FirewallD1", "/org/fedoraproject/FirewallD1"
+        bus,
+        "org.fedoraproject.FirewallD1",
+        "/org/fedoraproject/FirewallD1",
     )
     firewalld = firewalld_root.get_interface("org.fedoraproject.FirewallD1")
     await firewalld.call_authorize_all()

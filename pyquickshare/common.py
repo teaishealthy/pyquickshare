@@ -18,14 +18,14 @@ def from_url64(data: str) -> bytes:
     return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
 
 
-def create_task(*args: Any, **kwargs: Any):
+def create_task(*args: Any, **kwargs: Any) -> asyncio.Task[Any]:  # - Any is good enough for this
     task = asyncio.create_task(*args, **kwargs)
     tasks.append(task)
     return task
 
 
 @atexit.register
-def shutdown():
+def shutdown() -> None:
     for task in tasks:
         task.cancel()
 
@@ -40,7 +40,7 @@ class Type(Enum):
 VERSION = 0b000
 
 
-def safe_assert(condition: bool, message: str | None = None) -> None:
+def safe_assert(condition: bool, message: str | None = None) -> None:  # noqa: FBT001 - this is an 'assert'
     if not condition:
         raise AssertionError(message or "Assertion failed")
 

@@ -16,7 +16,10 @@ from .common import read
 from .protos import securemessage_pb2, ukey_pb2
 
 KEYCHAIN_SALT = hashlib.sha256(b"SecureMessage").digest()
-D2D_SALT = binascii.unhexlify("82AA55A0D397F88346CA1CEE8D3909B95F13FA7DEB1D4AB38376B8256DA85510")  # fmt: off
+D2D_SALT = binascii.unhexlify(
+    "82AA55A0D397F88346CA1CEE8D3909B95F13FA7DEB1D4AB38376B8256DA85510",
+)  # fmt: off
+EXPECTED_RANDOM_LENGTH = 32
 
 SUPPORTED_PROTOCOLS = [
     "AES_256_CBC-HMAC_SHA256",
@@ -42,7 +45,8 @@ def from_twos_complement(data: bytes) -> int:
 
 
 async def parse_client_init(
-    ukey_client_init: ukey_pb2.Ukey2ClientInit, writer: asyncio.StreamWriter
+    ukey_client_init: ukey_pb2.Ukey2ClientInit,
+    writer: asyncio.StreamWriter,
 ) -> tuple[str, ukey_pb2.Ukey2ClientInit.CipherCommitment] | None:
     if ukey_client_init.version != 1:
         return await ukey_alert(
@@ -51,7 +55,7 @@ async def parse_client_init(
             writer=writer,
         )
 
-    if len(ukey_client_init.random) != 32:
+    if len(ukey_client_init.random) != EXPECTED_RANDOM_LENGTH:
         return await ukey_alert(
             alert_type=ukey_pb2.Ukey2Alert.BAD_RANDOM,
             alert_message="Expected 32 bytes of random",
@@ -177,7 +181,8 @@ def decode_public_key(
     generic_key: securemessage_pb2.GenericPublicKey,
 ) -> ec.EllipticCurvePublicKey:
     if generic_key.type != securemessage_pb2.EC_P256:
-        raise ValueError("Expected EC_P256")
+        msg = "Expected EC_P256"
+        raise ValueError(msg)
 
     public_numbers = ec.EllipticCurvePublicNumbers(
         from_twos_complement(generic_key.ec_p256_public_key.x),
@@ -276,7 +281,8 @@ def swap_keychain(keychain: Keychain) -> Keychain:
 
 
 async def do_server_key_exchange(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
 ) -> Keychain | None:
     ukey_message = ukey_pb2.Ukey2Message()
 
@@ -298,7 +304,7 @@ async def do_server_key_exchange(
     maybe_result = await parse_client_init(ukey_client_init, writer)
 
     if not maybe_result:
-        return
+        return None
 
     _next_protocol, cipher_commitment = maybe_result
 
@@ -308,18 +314,21 @@ async def do_server_key_exchange(
     m2 = await send_server_init(private_key, cipher_commitment, writer)
 
     peer_public_key = await parse_client_finished(
-        await read(reader), cipher_commitment, writer
+        await read(reader),
+        cipher_commitment,
+        writer,
     )
 
     if not peer_public_key:
         # parse_client_finished() rejected the CLIENT_FINISH message
-        return
+        return None
 
     return derive_keys(m1, m2, private_key, peer_public_key)
 
 
 async def do_client_key_exchange(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
 ) -> Keychain | None:
     private_key = ec.generate_private_key(ec.SECP256R1())
     public_key = private_key.public_key()
@@ -331,19 +340,17 @@ async def do_client_key_exchange(
     ukey_client_finished_framing.message_type = ukey_pb2.Ukey2Message.CLIENT_FINISH
     ukey_client_finished_framing.message_data = ukey_client_finished.SerializeToString()
 
-    serialized_ukey_client_finished_framed = (
-        ukey_client_finished_framing.SerializeToString()
-    )
+    serialized_ukey_client_finished_framed = ukey_client_finished_framing.SerializeToString()
 
     ukey_client_init = ukey_pb2.Ukey2ClientInit()
     ukey_client_init.version = 1
     ukey_client_init.random = os.urandom(32)
-    ukey_client_init.next_protocol = "AES_256_CBC-HMAC_SHA256"  # FIXME: hardcoded
+    ukey_client_init.next_protocol = "AES_256_CBC-HMAC_SHA256"  # TODO: hardcoded
     ukey_client_init.cipher_commitments.append(
         ukey_pb2.Ukey2ClientInit.CipherCommitment(
             handshake_cipher=ukey_pb2.P256_SHA512,
             commitment=hashlib.sha512(serialized_ukey_client_finished_framed).digest(),
-        )
+        ),
     )
 
     message_framing = ukey_pb2.Ukey2Message()
@@ -390,7 +397,8 @@ async def ukey_alert(
 
 
 def make_alert(
-    alert_type: ukey_pb2.Ukey2Alert.AlertType, error_message: str
+    alert_type: ukey_pb2.Ukey2Alert.AlertType,
+    error_message: str,
 ) -> ukey_pb2.Ukey2Message:
     # Constructs an alert message
     alert = ukey_pb2.Ukey2Alert()

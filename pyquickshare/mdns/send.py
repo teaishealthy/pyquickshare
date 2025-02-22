@@ -15,13 +15,15 @@ from zeroconf.asyncio import (
     AsyncZeroconf,
 )
 
-from ..common import create_task
+from ..common import create_task, tasks
 
 SERVICE_UUID = "FE2C"
 SERVICE_DATA = binascii.unhexlify("fc128e0142000000000000000000")
 
 logger = getLogger(__name__)
-bluetooth = logger.parent.getChild("bluetooth")  # type: ignore
+bluetooth = logger.parent.getChild(  # pyright: ignore[reportOptionalMemberAccess]
+    "bluetooth",
+)
 
 
 _tasks: list[asyncio.Task[Any]] = []
@@ -38,14 +40,15 @@ class AsyncRunner:
 
         services = ["_FC9F5ED42C8A._tcp.local."]
         self.aiobrowser = AsyncServiceBrowser(
-            self.aiozc.zeroconf, services, handlers=[self.async_on_service_state_change]
+            self.aiozc.zeroconf,
+            services,
+            handlers=[self.async_on_service_state_change],
         )
-        while True:
-            await asyncio.sleep(1)
+        await asyncio.Event().wait()
 
     async def async_close(self) -> None:
-        assert self.aiozc is not None
-        assert self.aiobrowser is not None
+        assert self.aiozc is not None  # noqa: S101 - escape hatch for the type checker
+        assert self.aiobrowser is not None  # noqa: S101 - escape hatch for the type checker
         await self.aiobrowser.async_cancel()
         await self.aiozc.async_close()
 
@@ -59,12 +62,19 @@ class AsyncRunner:
         if state_change is not ServiceStateChange.Added:
             return
         logger.debug("Discovered QuickShare service: %s", name)
-        asyncio.ensure_future(
-            self.async_display_service_info(zeroconf, service_type, name)
+
+        # make sure this gets cleaned up properly
+        tasks.append(
+            asyncio.ensure_future(
+                self.async_display_service_info(zeroconf, service_type, name),
+            ),
         )
 
     async def async_display_service_info(
-        self, zeroconf: Zeroconf, service_type: str, name: str
+        self,
+        zeroconf: Zeroconf,
+        service_type: str,
+        name: str,
     ) -> None:
         info = AsyncServiceInfo(service_type, name)
         await info.async_request(zeroconf, 3000)
@@ -73,11 +83,11 @@ class AsyncRunner:
             await self.result.put(info)
 
 
-async def trigger_devices():
+async def trigger_devices() -> None:
     # I actually have zero clue what I'm doing here
 
     server = BlessServerBlueZDBus(name="pyquickshare")
-    await server.setup_task  # type: ignore
+    await server.setup_task  # pyright: ignore[reportUnknownMemberType]
     bluetooth.debug("Connected to BlueZ D-Bus")  # Hello :3
 
     await server.app.set_name(server.adapter, server.name)
@@ -85,7 +95,7 @@ async def trigger_devices():
 
     advertisement.ServiceUUIDs = [SERVICE_UUID]
     advertisement.ServiceData = {
-        SERVICE_UUID: Variant("ay", SERVICE_DATA + random.randbytes(9))
+        SERVICE_UUID: Variant("ay", SERVICE_DATA + random.randbytes(9)),  # noqa: S311 - random is fine here
     }
 
     server.app.advertisements = [advertisement]
@@ -94,7 +104,10 @@ async def trigger_devices():
 
     iface = server.adapter.get_interface("org.bluez.LEAdvertisingManager1")
 
-    await iface.call_register_advertisement(advertisement.path, {})  # type: ignore
+    await iface.call_register_advertisement(  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        advertisement.path,
+        {},
+    )
 
     bluetooth.debug("Advertising QuickShare service")
 
@@ -102,7 +115,7 @@ async def trigger_devices():
     await asyncio.Future()
 
 
-async def discover_services(timeout: float = 10) -> asyncio.Queue[AsyncServiceInfo]:
+async def discover_services(timeout: float = 10) -> asyncio.Queue[AsyncServiceInfo]:  # noqa: ARG001 # TODO: actually timeout
     task = create_task(trigger_devices())
     _tasks.append(task)
 

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, NamedTuple, TypeAlias
 
-from .protos.wire_format_pb2 import WifiCredentialsMetadata
+if TYPE_CHECKING:
+    from .protos.wire_format_pb2 import WifiCredentialsMetadata
 
 
 class FileResult(NamedTuple):

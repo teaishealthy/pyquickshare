@@ -1,3 +1,4 @@
+# ruff: noqa: PGH003
 # the mDNS part of QuickShare
 from __future__ import annotations
 
@@ -54,11 +55,10 @@ class IPV4Runner:
         await asyncio.gather(*background_tasks)  # type: ignore
         logger.debug("Registered %d services", len(infos))
 
-        while True:
-            await asyncio.sleep(1)
+        await asyncio.Event().wait()
 
     async def unregister_services(self, infos: list[AsyncServiceInfo]) -> None:
-        assert self.aiozc is not None
+        assert self.aiozc is not None  # noqa: S101 - escape hatch for the type checker
         tasks = [self.aiozc.async_unregister_service(info) for info in infos]  # type: ignore
         background_tasks = await asyncio.gather(*tasks)  # type: ignore
         await asyncio.gather(*background_tasks)  # type: ignore
@@ -77,7 +77,7 @@ def make_service_name(endpoint_id: bytes) -> bytearray:
     return array
 
 
-def make_n(*, visible: bool, type: Type, name: bytes) -> bytearray:
+def make_n(*, visible: bool, type: Type, name: bytes) -> bytearray:  # noqa: ARG001 # TODO: fix this
     n = bytearray()
 
     # n record:
@@ -86,16 +86,20 @@ def make_n(*, visible: bool, type: Type, name: bytes) -> bytearray:
     # one byte: length of name
     # name, utf-8 encoded
 
-    n.append(2)  # FIXME: compute flags from visibility, type, and VERSION
+    n.append(2)  # flags
     # add 16 0 bytes
-    n.extend([random.randint(1, 8) for _ in range(16)])
+    n.extend([random.randint(1, 8) for _ in range(16)])  # noqa: S311 - random is fine here
     n.append(len(name))
     n.extend(name)
     return n
 
 
 async def make_service(
-    *, visible: bool, type_: Type, name: bytes, endpoint_id: bytes
+    *,
+    visible: bool,
+    type_: Type,
+    name: bytes,
+    endpoint_id: bytes,
 ) -> tuple[int, AsyncServiceInfo]:
     _name = to_url64(make_service_name(endpoint_id))
     n = make_n(visible=visible, type=type_, name=name)
@@ -119,7 +123,7 @@ async def make_service(
         ips.append(ip)
 
     with closing(socket.socket(socket.AF_INET, socket.SOCK_DGRAM)) as sock:
-        sock.bind(("0.0.0.0", 0))
+        sock.bind(("0.0.0.0", 0))  # noqa: S104 - we only care about the port
         _, port = sock.getsockname()
 
     try:
@@ -127,7 +131,7 @@ async def make_service(
             await temporarily_open_port(interface, port)
     except dbus_next.errors.DBusError as e:
         if e.text == "The name is not activatable":
-            logger.error(
+            logger.exception(
                 "Failed to open port %d. Are you using firewalld? "
                 "You may need to manually open the port on your firewall.",
                 port,
