@@ -1,5 +1,9 @@
 # pyquickshare
 
+![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/teaishealthy/pyquickshare/test.yml?style=flat-square&label=tests)
+![Coveralls](https://img.shields.io/coverallsCoverage/github/teaishealthy/pyquickshare?style=flat-square)
+
+
 An implementation of QuickShare in Python.
 
 ## System requirements
