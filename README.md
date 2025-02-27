@@ -29,7 +29,7 @@ Communication with `firewalld` is done over D-Bus, `polkit` may prompt for authe
 ## Installation
 
 ```bash
-uv install
+pip install git+https://github.com/teaishealthy/pyquickshare
 ```
 
 ## Features
