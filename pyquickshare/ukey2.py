@@ -37,10 +37,26 @@ class Keychain(typing.NamedTuple):
 
 
 def to_twos_complement(n: int) -> bytes:
+    """Convert an integer to a two's complement byte array.
+
+    Args:
+        n (int): The integer to convert
+
+    Returns:
+        bytes: The two's complement byte array
+    """
     return n.to_bytes(((n.bit_length() + 7) // 8) + 1, "big", signed=True)
 
 
 def from_twos_complement(data: bytes) -> int:
+    """Convert a two's complement byte array to an integer.
+
+    Args:
+        data (bytes): The two's complement byte array
+
+    Returns:
+        int: The integer
+    """
     return int.from_bytes(data, "big", signed=True)
 
 
@@ -48,6 +64,15 @@ async def parse_client_init(
     ukey_client_init: ukey_pb2.Ukey2ClientInit,
     writer: asyncio.StreamWriter,
 ) -> tuple[str, ukey_pb2.Ukey2ClientInit.CipherCommitment] | None:
+    """Parse a CLIENT_INIT message.
+
+    Args:
+        ukey_client_init (ukey_pb2.Ukey2ClientInit): The CLIENT_INIT message
+        writer (asyncio.StreamWriter): The writer to send alerts to
+
+    Returns:
+        tuple[str, ukey_pb2.Ukey2ClientInit.CipherCommitment] | None: The next protocol and cipher commitment, or None if the message is invalid
+    """  # noqa: E501
     if ukey_client_init.version != 1:
         return await ukey_alert(
             alert_type=ukey_pb2.Ukey2Alert.BAD_VERSION,
@@ -95,6 +120,16 @@ async def send_server_init(
     cipher_commitment: ukey_pb2.Ukey2ClientInit.CipherCommitment,
     writer: asyncio.StreamWriter,
 ) -> bytes:
+    """Send a SERVER_INIT message.
+
+    Args:
+        private_key (ec.EllipticCurvePrivateKey): The server's private key
+        cipher_commitment (ukey_pb2.Ukey2ClientInit.CipherCommitment): The cipher commitment from the client
+        writer (asyncio.StreamWriter): The writer to send the message to
+
+    Returns:
+        bytes: The serialized SERVER_INIT message (for key derivation)
+    """  # noqa: E501
     server_init = ukey_pb2.Ukey2ServerInit()
 
     server_init.version = 1
@@ -131,6 +166,16 @@ async def parse_client_finished(
     commitment: ukey_pb2.Ukey2ClientInit.CipherCommitment,
     writer: asyncio.StreamWriter,
 ) -> ec.EllipticCurvePublicKey | None:
+    """Parse a CLIENT_FINISH message.
+
+    Args:
+        raw_message (bytes): The raw CLIENT_FINISH message
+        commitment (ukey_pb2.Ukey2ClientInit.CipherCommitment): The cipher commitment from the client
+        writer (asyncio.StreamWriter): The writer to send alerts to
+
+    Returns:
+        ec.EllipticCurvePublicKey | None: The client's public key, or None if the message is invalid
+    """  # noqa: E501
     # There are a lot of things that need to be checked here
     # that's why we accept a raw message
 
@@ -167,6 +212,14 @@ async def parse_client_finished(
 def encode_public_key(
     public_key: ec.EllipticCurvePublicKey,
 ) -> securemessage_pb2.GenericPublicKey:
+    """Encode an EllipticCurvePublicKey as a GenericPublicKey.
+
+    Args:
+        public_key (ec.EllipticCurvePublicKey): The public key to encode
+
+    Returns:
+        securemessage_pb2.GenericPublicKey: The encoded public key
+    """
     public_numbers = public_key.public_numbers()
 
     generic_key = securemessage_pb2.GenericPublicKey()
@@ -180,6 +233,17 @@ def encode_public_key(
 def decode_public_key(
     generic_key: securemessage_pb2.GenericPublicKey,
 ) -> ec.EllipticCurvePublicKey:
+    """Decode a GenericPublicKey as an EllipticCurvePublicKey.
+
+    Args:
+        generic_key (securemessage_pb2.GenericPublicKey): The public key to decode
+
+    Raises:
+        ValueError: If the key is not EC_P256
+
+    Returns:
+        ec.EllipticCurvePublicKey: The decoded public key
+    """
     if generic_key.type != securemessage_pb2.EC_P256:
         msg = "Expected EC_P256"
         raise ValueError(msg)
@@ -199,6 +263,17 @@ def derive_keys(
     private_key: ec.EllipticCurvePrivateKey,
     peer_public_key: ec.EllipticCurvePublicKey,
 ) -> Keychain:
+    """Derive the keys for a session.
+
+    Args:
+        m1 (bytes): The first message (CLIENT_INIT or SERVER_INIT)
+        m2 (bytes): The second message (SERVER_INIT or CLIENT_INIT)
+        private_key (ec.EllipticCurvePrivateKey): Our private key
+        peer_public_key (ec.EllipticCurvePublicKey): The peer's public key
+
+    Returns:
+        Keychain: The derived keys
+    """
     dhs = hashlib.sha256(private_key.exchange(ec.ECDH(), peer_public_key)).digest()
 
     next_secret = HKDF(
@@ -270,7 +345,14 @@ def derive_keys(
 
 
 def swap_keychain(keychain: Keychain) -> Keychain:
-    # changes the perspective of the keychain
+    """Swap the perspective of a keychain.
+
+    Args:
+        keychain (Keychain): The keychain to swap
+
+    Returns:
+        Keychain: The swapped keychain
+    """
     return Keychain(
         decrypt_key=keychain.encrypt_key,
         receive_hmac_key=keychain.send_hmac_key,
@@ -284,6 +366,15 @@ async def do_server_key_exchange(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
 ) -> Keychain | None:
+    """Perform a server key exchange.
+
+    Args:
+        reader (asyncio.StreamReader): The reader
+        writer (asyncio.StreamWriter): The writer
+
+    Returns:
+        Keychain | None: The keychain, or None if the exchange failed
+    """
     ukey_message = ukey_pb2.Ukey2Message()
 
     m1 = await read(reader)
@@ -330,6 +421,15 @@ async def do_client_key_exchange(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
 ) -> Keychain | None:
+    """Perform a client key exchange.
+
+    Args:
+        reader (asyncio.StreamReader): The reader
+        writer (asyncio.StreamWriter): The writer
+
+    Returns:
+        Keychain | None: The keychain, or None if the exchange failed
+    """
     private_key = ec.generate_private_key(ec.SECP256R1())
     public_key = private_key.public_key()
 
@@ -388,6 +488,13 @@ async def ukey_alert(
     alert_message: str,
     writer: asyncio.StreamWriter,
 ) -> None:
+    """Send an alert message and close the connection.
+
+    Args:
+        alert_type (ukey_pb2.Ukey2Alert.AlertType): The alert type
+        alert_message (str): The alert message
+        writer (asyncio.StreamWriter): The writer to send the alert to
+    """
     # Sends an alert over the wire, closes the connection
     message = make_alert(alert_type, alert_message)
 
@@ -400,6 +507,15 @@ def make_alert(
     alert_type: ukey_pb2.Ukey2Alert.AlertType,
     error_message: str,
 ) -> ukey_pb2.Ukey2Message:
+    """Construct an alert message.
+
+    Args:
+        alert_type (ukey_pb2.Ukey2Alert.AlertType): The alert type
+        error_message (str): The error message
+
+    Returns:
+        ukey_pb2.Ukey2Message: The constructed alert message
+    """
     # Constructs an alert message
     alert = ukey_pb2.Ukey2Alert()
     alert.type = alert_type

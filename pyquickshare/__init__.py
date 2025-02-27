@@ -53,6 +53,8 @@ if TYPE_CHECKING:
 
 
 __all__ = (
+    "ShareRequest",
+    "discover_services",
     "generate_enpoint_id",
     "receive",
     "send_to",
@@ -176,8 +178,14 @@ def _make_send(
 def generate_enpoint_id() -> bytes:
     """Generate a random 4-byte endpoint ID.
 
+    Example:
+        .. code-block:: python
+
+            endpoint_id = generate_enpoint_id()
+            async for request in receive(endpoint_id=endpoint_id):
+                ...
+
     Returns:
-    -------
         bytes: The generated endpoint ID
 
     """
@@ -853,11 +861,22 @@ async def _handle_target(  # noqa: PLR0915 # TODO: refactor
         await task
 
 
-async def receive(*, endpoint_id: bytes | None = None) -> AsyncIterator[ShareRequest,]:
+async def receive(*, endpoint_id: bytes | None = None) -> AsyncIterator[ShareRequest]:
     """Receive something over Quick Share. Runs forever.
 
     This function registers an mDNS service and opens a socket server to receive data.
     If firewalld is available, it temporarily reconfigures firewalld to allow incoming connections on the port.
+
+    Yields:
+        ShareRequest: A request to share something
+
+    Example:
+        .. code-block:: python
+
+            async for request in receive():
+                results = await request.accept()
+                print(results)
+
     """  # noqa: E501
     if endpoint_id and len(endpoint_id) != 4:  # noqa: PLR2004, this is not a magic number
         msg = "endpoint_id must be 4 bytes (and in ASCII)"
@@ -889,7 +908,14 @@ async def _start_mdns_service(services: list[AsyncServiceInfo]) -> None:
 
 
 async def discover_services() -> AsyncIterator[AsyncServiceInfo]:
-    """Discover services on the network."""
+    """Discover services on the network.
+
+    Example:
+        .. code-block:: python
+
+            async for service in discover_services():
+                print(service)
+    """
     queue = await _discover_services()
     while True:
         yield await queue.get()
