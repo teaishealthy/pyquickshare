@@ -58,9 +58,9 @@ uv run example.py send <file>
 
 ## Notes and Acknowledgements
 
-The code in [`pyquickshare/protos`](pyquickshare/protos) is generated from protobuf sources licensed under Apache 2.0.
+The code in [`pyquickshare/protos`](https://github.com/teaishealthy/pyquickshare/blob/main/pyquickshare/protos/) is generated from protobuf sources licensed under Apache 2.0.
 As a derivative work, these generated files remain under the original Apache 2.0 license.
-A copy of the original license can be found in the [`pyquickshare/protos`](pyquickshare/protos) directory.
+A copy of the original license can be found in the [`pyquickshare/protos`](https://github.com/teaishealthy/pyquickshare/blob/main/pyquickshare/protos/) directory.
 
 
 This project would not have been possible without the amazing reverse engineering work done by [grishka](https://github.com/grishka/) on the Quick Share protocol.
