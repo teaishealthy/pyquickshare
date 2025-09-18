@@ -113,8 +113,6 @@ async def test_handle_client():
 
         task1 = asyncio.create_task(_handle_client(queue, client_reader, client_writer))
 
-
-        print(tmp.name)
         task2 = asyncio.create_task(
             _handle_target(tmp.name, server_reader, server_writer)
         )

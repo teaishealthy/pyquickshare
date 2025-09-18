@@ -288,7 +288,6 @@ def _payloadify(  # noqa: PLR0913 - not a lot we can do about this
     total_size: int | None = None,
     sequence_number: Callable[[], int],
 ) -> bytes:
-    print(file_name)
     # We're working from the inside out here
 
     payload_frame = offline_wire_formats_pb2.OfflineFrame()
@@ -557,7 +556,6 @@ async def _handle_client(  # noqa: C901 , PLR0912 , PLR0915 # TODO: refactor
                         nearby.debug("Rejecting introduction")
                         # TODO: send a rejection
 
-                    #await send(_generate_accept())
                 elif wire_frame.v1.introduction.text_metadata:
                     receive_mode = ReceiveMode.TEXT
                     request = ShareRequest(payload_header, to_pin(keychain.auth_string))
@@ -595,7 +593,6 @@ async def _handle_client(  # noqa: C901 , PLR0912 , PLR0915 # TODO: refactor
 async def _socket_server(
     requests: asyncio.Queue[ShareRequest], *, interface_info: InterfaceInfo
 ) -> None:
-    print(interface_info)
     server = await asyncio.start_server(
         lambda reader, writer: _handle_client(requests, reader, writer),
         interface_info.ips,
@@ -860,12 +857,6 @@ async def _handle_target(  # noqa: PLR0915 # TODO: refactor
                 nearby.debug("Peer rejected our introduction. Aborting")
                 break
         else:
-            has_introduction = getattr(wire_frame.v1, "introduction", None)
-            has_connection_response = getattr(wire_frame.v1, "connection_response", None)
-            has_paired_key_encryption = getattr(wire_frame.v1, "paired_key_encryption", None)
-            has_paired_key_result = getattr(wire_frame.v1, "paired_key_result", None)
-            has_certificate_info = getattr(wire_frame.v1, "certificate_info", None)
-
             logger.warning("Received unknown frame %d type %d", payload_header.id, wire_frame.v1.type)
 
     task.cancel()
