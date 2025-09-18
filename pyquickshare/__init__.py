@@ -18,6 +18,7 @@ import time
 from logging import getLogger
 from typing import TYPE_CHECKING, cast
 
+import aiofile
 import magic
 from cryptography.hazmat.primitives import hashes, hmac, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -464,10 +465,10 @@ async def _handle_client(  # noqa: C901 , PLR0912 , PLR0915 # TODO: refactor
                     "Received full file, saving to downloads/%s",
                     payload_header.file_name,
                 )
-                with open(  # noqa: PTH123, ASYNC230 # TODO: refactor
+                async with aiofile.async_open(
                     f"downloads/{payload_header.file_name}", "wb"
                 ) as f:
-                    f.write(data)
+                    await f.write(data)
 
                 results.append(
                     FileResult(
@@ -668,11 +669,11 @@ async def _send_file(
     nearby.debug("Sending file %r", file)
     file_name = path.name
 
-    with open(file, "rb") as f:  # noqa: PTH123, ASYNC230 # TODO: refactor
+    async with aiofile.async_open(file, "rb") as f:
         while True:
             offset = f.tell()
             # 512KB chunks
-            chunk = f.read(512 * 1024)
+            chunk = await f.read(512 * 1024)
 
             if not chunk:
                 break

@@ -7,6 +7,7 @@ requires-python = "~=3.10.0"
 readme = "README.md"
 license = "MIT"
 dependencies = [
+    "aiofile>=3.9.0",
     "bless>=0.2.6",
     "cryptography>=44.0.1",
     "dbus-next>=0.2.3",
