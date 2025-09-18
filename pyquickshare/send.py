@@ -7,6 +7,7 @@ import random
 import socket
 import string
 import struct
+import time
 from logging import getLogger
 from typing import TYPE_CHECKING, AsyncIterator
 
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
 logger = getLogger(__name__)
 
 NAME = "pyquickshare"
+CHUNK_SIZE = 512 * 1024
 
 
 def _mime_to_type(mime_type: str) -> wire_format_pb2.FileMetadata.Type:
@@ -127,34 +129,48 @@ async def _send_file(
     sequence_number: Callable[[], int],
     id: int,
 ) -> None:
+    start_time = time.perf_counter()
     path = pathlib.Path(file)
     total_size = path.stat().st_size
     logger.debug("Sending file %r", file)
     file_name = path.name
 
+    sem = asyncio.Semaphore(
+        int((total_size // CHUNK_SIZE) * 0.9) if total_size >= CHUNK_SIZE else 1
+    )
+
+    async def with_semaphore(task: asyncio.Task[None]) -> None:
+        async with sem:
+            await task
+
+    async def write_task(offset: int) -> None:
+        f.seek(offset)
+        # 512KB chunks
+        chunk = await f.read(CHUNK_SIZE)
+
+        if not chunk:
+            return
+
+        payload = payloadify(
+            chunk,
+            keychain,
+            flags=0,
+            total_size=total_size,
+            offset=offset,
+            id=id,
+            file_name=file_name,
+            type=offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.FILE,
+            sequence_number=sequence_number,
+        )
+        writer.write(struct.pack(">I", len(payload)))
+        writer.write(payload)
+        await writer.drain()
+
     async with aiofile.async_open(file, "rb") as f:
-        while True:
-            offset = f.tell()
-            # 512KB chunks
-            chunk = await f.read(512 * 1024)
-
-            if not chunk:
-                break
-
-            payload = payloadify(
-                chunk,
-                keychain,
-                flags=0,
-                total_size=total_size,
-                offset=offset,
-                id=id,
-                file_name=file_name,
-                type=offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.FILE,
-                sequence_number=sequence_number,
-            )
-            writer.write(struct.pack(">I", len(payload)))
-            writer.write(payload)
-            await writer.drain()
+        await asyncio.gather(
+            *(with_semaphore((write_task(offset))) for offset in range(0, total_size, CHUNK_SIZE))
+        )
+        await writer.drain()
 
         payload = payloadify(
             b"",
@@ -168,9 +184,21 @@ async def _send_file(
             sequence_number=sequence_number,
         )
 
-        writer.write(struct.pack(">I", len(payload)))
-        writer.write(payload)
+        await asyncio.get_event_loop().run_in_executor(
+            None, lambda: writer.write(struct.pack(">I", len(payload)))
+        )
+        await asyncio.get_event_loop().run_in_executor(None, lambda: writer.write(payload))
         await writer.drain()
+
+    end_time = time.perf_counter()
+    megabytes_per_second = (total_size / 1024 / 1024) / (end_time - start_time)
+
+    logger.debug(
+        "Took %.2f seconds to send %d bytes (%.2f MB/s)",
+        end_time - start_time,
+        total_size,
+        megabytes_per_second,
+    )
 
 
 async def send_to(service: AsyncServiceInfo, *, file: str) -> None:
