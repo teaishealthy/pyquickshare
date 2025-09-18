@@ -66,6 +66,9 @@ omit = ["pyquickshare/protos/*"]
 [tool.coverage.report]
 exclude_also = ["pragma: no cover", "if TYPE_CHECKING:"]
 
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "session"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
