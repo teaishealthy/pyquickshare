@@ -598,7 +598,7 @@ async def _socket_server(
     print(interface_info)
     server = await asyncio.start_server(
         lambda reader, writer: _handle_client(requests, reader, writer),
-        "0.0.0.0",
+        interface_info.ips,
         interface_info.port,
     )
 
