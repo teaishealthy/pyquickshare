@@ -9,7 +9,7 @@ import string
 import struct
 import time
 from logging import getLogger
-from typing import TYPE_CHECKING, AsyncIterator
+from typing import TYPE_CHECKING, AsyncIterator, Awaitable
 
 import aiofile
 import magic
@@ -139,7 +139,7 @@ async def _send_file(
         int((total_size // CHUNK_SIZE) * 0.9) if total_size >= CHUNK_SIZE else 1
     )
 
-    async def with_semaphore(task: asyncio.Task[None]) -> None:
+    async def with_semaphore(task: Awaitable[None]) -> None:
         async with sem:
             await task
 
@@ -168,7 +168,7 @@ async def _send_file(
 
     async with aiofile.async_open(file, "rb") as f:
         await asyncio.gather(
-            *(with_semaphore((write_task(offset))) for offset in range(0, total_size, CHUNK_SIZE))
+            *(with_semaphore(write_task(offset)) for offset in range(0, total_size, CHUNK_SIZE))
         )
         await writer.drain()
 
