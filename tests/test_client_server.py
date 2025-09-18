@@ -6,7 +6,8 @@ from typing import Any
 import pytest
 
 import pyquickshare
-from pyquickshare import _handle_client, _handle_target  # type: ignore
+from pyquickshare.receive import _handle_client  # type: ignore
+from pyquickshare.send import _handle_target  # type: ignore
 
 logging.basicConfig(level=logging.DEBUG)
 

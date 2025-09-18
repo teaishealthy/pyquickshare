@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import pathlib
 import random
 import socket
 from contextlib import closing, suppress
@@ -15,18 +14,15 @@ import ifaddr
 from zeroconf import IPVersion
 from zeroconf.asyncio import AsyncServiceInfo, AsyncZeroconf
 
-from ..common import InterfaceInfo, Type, to_url64
+from ..common import NETWORK_BASE_PATH, InterfaceInfo, Type, to_url64
 from ..firewalld import temporarily_open_port
 
 logger = getLogger(__name__)
 
 
-BASE_PATH = pathlib.Path("/sys/class/net")
-
-
 def get_interfaces() -> list[str]:
     interfaces: list[str] = []
-    for ifa in BASE_PATH.iterdir():
+    for ifa in NETWORK_BASE_PATH.iterdir():
         carrier = ifa.joinpath("carrier")
         with suppress(OSError):
             if (
@@ -36,12 +32,6 @@ def get_interfaces() -> list[str]:
             ):
                 interfaces.append(ifa.name)
     return interfaces
-
-
-def get_interface_mac(interface: str) -> bytes:
-    mac_path = BASE_PATH / interface / "address"
-
-    return bytes.fromhex(mac_path.read_text().strip().replace(":", ""))
 
 
 class IPV4Runner:
@@ -105,16 +95,13 @@ async def make_service(
     _name = to_url64(make_service_name(endpoint_id))
     n = make_n(visible=visible, type=type_, name=name)
 
-
-    info = AsyncServiceInfo(
+    return AsyncServiceInfo(
         "_FC9F5ED42C8A._tcp.local.",
         f"{_name}._FC9F5ED42C8A._tcp.local.",
         port=interface_info.port,
         parsed_addresses=interface_info.ips,
         properties={"n": to_url64(n)},
     )
-
-    return info
 
 
 async def get_interface_info() -> InterfaceInfo:

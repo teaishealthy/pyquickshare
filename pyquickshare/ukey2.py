@@ -5,14 +5,13 @@ import binascii
 import hashlib
 import os
 import struct
-import typing
 from logging import getLogger
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from .common import read
+from .common import Keychain, read
 from .protos import securemessage_pb2, ukey_pb2
 
 KEYCHAIN_SALT = hashlib.sha256(b"SecureMessage").digest()
@@ -26,14 +25,6 @@ SUPPORTED_PROTOCOLS = [
 ]
 
 logger = getLogger(__name__)
-
-
-class Keychain(typing.NamedTuple):
-    decrypt_key: bytes
-    receive_hmac_key: bytes
-    encrypt_key: bytes
-    send_hmac_key: bytes
-    auth_string: bytes
 
 
 def to_twos_complement(n: int) -> bytes:
