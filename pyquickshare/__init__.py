@@ -22,9 +22,10 @@ import magic
 from cryptography.hazmat.primitives import hashes, hmac, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from .common import Type, create_task, from_url64, read, safe_assert
+from .common import InterfaceInfo, Type, create_task, from_url64, read, safe_assert
 from .mdns.receive import (
     IPV4Runner,
+    get_interface_info,
     get_interface_mac,
     get_interfaces,
     make_n,
@@ -55,7 +56,7 @@ if TYPE_CHECKING:
 __all__ = (
     "ShareRequest",
     "discover_services",
-    "generate_enpoint_id",
+    "generate_endpoint_id",
     "receive",
     "send_to",
 )
@@ -175,13 +176,13 @@ def _make_send(
     return send
 
 
-def generate_enpoint_id() -> bytes:
+def generate_endpoint_id() -> bytes:
     """Generate a random 4-byte endpoint ID.
 
     Example:
         .. code-block:: python
 
-            endpoint_id = generate_enpoint_id()
+            endpoint_id = generate_endpoint_id()
             async for request in receive(endpoint_id=endpoint_id):
                 ...
 
@@ -286,6 +287,7 @@ def _payloadify(  # noqa: PLR0913 - not a lot we can do about this
     total_size: int | None = None,
     sequence_number: Callable[[], int],
 ) -> bytes:
+    print(file_name)
     # We're working from the inside out here
 
     payload_frame = offline_wire_formats_pb2.OfflineFrame()
@@ -533,16 +535,16 @@ async def _handle_client(  # noqa: C901 , PLR0912 , PLR0915 # TODO: refactor
                     await send(_generate_accept())
 
                 elif wire_frame.v1.introduction.file_metadata:
-                    receive_mode = ReceiveMode.FILES
-                    request = ShareRequest(payload_header, to_pin(keychain.auth_string))
-                    await requests.put(request)
-                    result = await request.respond
-
                     nearby.debug(
                         "%r wants to send %r",
                         name,
                         ", ".join(m.name for m in wire_frame.v1.introduction.file_metadata),
                     )
+
+                    receive_mode = ReceiveMode.FILES
+                    request = ShareRequest(payload_header, to_pin(keychain.auth_string))
+                    await requests.put(request)
+                    result = await request.respond
 
                     if result:
                         nearby.debug("Accepting introduction")
@@ -554,7 +556,7 @@ async def _handle_client(  # noqa: C901 , PLR0912 , PLR0915 # TODO: refactor
                         nearby.debug("Rejecting introduction")
                         # TODO: send a rejection
 
-                    await send(_generate_accept())
+                    #await send(_generate_accept())
                 elif wire_frame.v1.introduction.text_metadata:
                     receive_mode = ReceiveMode.TEXT
                     request = ShareRequest(payload_header, to_pin(keychain.auth_string))
@@ -566,7 +568,7 @@ async def _handle_client(  # noqa: C901 , PLR0912 , PLR0915 # TODO: refactor
 
                     await send(_generate_accept())
                 else:
-                    nearby.debug("Received unknown frame %d", payload_header.id)
+                    nearby.debug("Received weird introduction %d", payload_header.id)
             else:
                 nearby.debug("Received unknown frame %d", payload_header.id)
 
@@ -589,11 +591,14 @@ async def _handle_client(  # noqa: C901 , PLR0912 , PLR0915 # TODO: refactor
         await keep_alive_task
 
 
-async def _socket_server(port: int, requests: asyncio.Queue[ShareRequest]) -> None:
+async def _socket_server(
+    requests: asyncio.Queue[ShareRequest], *, interface_info: InterfaceInfo
+) -> None:
+    print(interface_info)
     server = await asyncio.start_server(
         lambda reader, writer: _handle_client(requests, reader, writer),
-        "0.0.0.0",  # noqa: S104 TODO: only bind to the interfaces we're actually using
-        port,
+        "0.0.0.0",
+        interface_info.port,
     )
 
     await server.serve_forever()
@@ -687,14 +692,13 @@ async def _send_file(
             writer.write(payload)
             await writer.drain()
 
-            file_name = None
-
         payload = _payloadify(
             b"",
             keychain,
             flags=1,
             total_size=total_size,
             offset=f.tell(),
+            file_name=file_name,
             id=id,
             type=offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.FILE,
             sequence_number=sequence_number,
@@ -760,7 +764,9 @@ async def _handle_target(  # noqa: PLR0915 # TODO: refactor
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
 ) -> None:
-    endpoint_id = _derive_endpoint_id_from_mac(
+    endpoint_id = generate_endpoint_id()
+
+    _derive_endpoint_id_from_mac(
         _pick_mac_deterministically(get_interfaces()),
     )
 
@@ -853,7 +859,13 @@ async def _handle_target(  # noqa: PLR0915 # TODO: refactor
                 nearby.debug("Peer rejected our introduction. Aborting")
                 break
         else:
-            logger.warning("Received unknown frame %d", payload_header.id)
+            has_introduction = getattr(wire_frame.v1, "introduction", None)
+            has_connection_response = getattr(wire_frame.v1, "connection_response", None)
+            has_paired_key_encryption = getattr(wire_frame.v1, "paired_key_encryption", None)
+            has_paired_key_result = getattr(wire_frame.v1, "paired_key_result", None)
+            has_certificate_info = getattr(wire_frame.v1, "certificate_info", None)
+
+            logger.warning("Received unknown frame %d type %d", payload_header.id, wire_frame.v1.type)
 
     task.cancel()
 
@@ -882,17 +894,20 @@ async def receive(*, endpoint_id: bytes | None = None) -> AsyncIterator[ShareReq
         msg = "endpoint_id must be 4 bytes (and in ASCII)"
         raise ValueError(msg)
 
-    port, info = await make_service(
+    interface_info = await get_interface_info()
+
+    info = await make_service(
         endpoint_id=endpoint_id
         or _derive_endpoint_id_from_mac(_pick_mac_deterministically(get_interfaces())),
         visible=True,
         type_=Type.phone,
         name=NAME.encode("utf-8"),
+        interface_info=interface_info,
     )
     services = [info]
     result: asyncio.Queue[ShareRequest] = asyncio.Queue()
 
-    create_task(_socket_server(port, result))
+    create_task(_socket_server( result, interface_info=interface_info))
     create_task(_start_mdns_service(services))
 
     while True:

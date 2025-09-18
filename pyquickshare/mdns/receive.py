@@ -15,7 +15,7 @@ import ifaddr
 from zeroconf import IPVersion
 from zeroconf.asyncio import AsyncServiceInfo, AsyncZeroconf
 
-from ..common import Type, to_url64
+from ..common import InterfaceInfo, Type, to_url64
 from ..firewalld import temporarily_open_port
 
 logger = getLogger(__name__)
@@ -100,10 +100,24 @@ async def make_service(
     type_: Type,
     name: bytes,
     endpoint_id: bytes,
-) -> tuple[int, AsyncServiceInfo]:
+    interface_info: InterfaceInfo,
+) -> AsyncServiceInfo:
     _name = to_url64(make_service_name(endpoint_id))
     n = make_n(visible=visible, type=type_, name=name)
 
+
+    info = AsyncServiceInfo(
+        "_FC9F5ED42C8A._tcp.local.",
+        f"{_name}._FC9F5ED42C8A._tcp.local.",
+        port=interface_info.port,
+        parsed_addresses=interface_info.ips,
+        properties={"n": to_url64(n)},
+    )
+
+    return info
+
+
+async def get_interface_info() -> InterfaceInfo:
     ips: list[str] = []
 
     ip = os.environ.get("QUICKSHARE_IP")
@@ -141,12 +155,4 @@ async def make_service(
 
     logger.debug("Using port %d", port)
 
-    info = AsyncServiceInfo(
-        "_FC9F5ED42C8A._tcp.local.",
-        f"{_name}._FC9F5ED42C8A._tcp.local.",
-        port=port,
-        parsed_addresses=ips,
-        properties={"n": to_url64(n)},
-    )
-
-    return port, info
+    return InterfaceInfo(ips=ips, port=port)

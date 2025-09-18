@@ -29,7 +29,7 @@ async def main(argv: list[str]) -> None:
         # asnyc for request in pyquickshare.receive(endpoint_id=b"1234"):
         # (the endpoint_id must be 4 bytes long, you can use pyquickshare.generate_enpoint_id())
 
-        async for request in pyquickshare.receive():
+        async for request in pyquickshare.receive(endpoint_id=pyquickshare.generate_endpoint_id()):
             results = await request.accept()
             print(results)
 

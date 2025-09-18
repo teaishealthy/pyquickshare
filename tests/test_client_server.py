@@ -79,19 +79,19 @@ async def test_async_streaming():
         (client_reader, client_writer),
     ) = await _stream_pairs()
 
-    server_writer.write(b"Hello, world!")
+    server_writer.write(b"Hello, client!")
     await server_writer.drain()
 
-    client_writer.write(b"Hello, world!")
+    client_writer.write(b"Hello, server!")
     await client_writer.drain()
 
     await asyncio.sleep(0)
 
     data = await client_reader.read(100)
-    assert data == b"Hello, world!"
+    assert data == b"Hello, client!"
 
     data = await server_reader.read(100)
-    assert data == b"Hello, world!"
+    assert data == b"Hello, server!"
 
 
 @pytest.mark.asyncio
@@ -107,18 +107,20 @@ async def test_handle_client():
         request = await queue.get()
         await request.accept()
 
-    tmpfile_name = tempfile.mktemp(suffix=".txt")
-    with open(tmpfile_name, "w") as f:
-        f.write("Hello, world!")
+    with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w") as tmp:
 
-    task1 = asyncio.create_task(_handle_client(queue, client_reader, client_writer))
+        tmp.write("Hello, world!")
 
-    task2 = asyncio.create_task(
-        _handle_target(tmpfile_name, server_reader, server_writer)
-    )
+        task1 = asyncio.create_task(_handle_client(queue, client_reader, client_writer))
 
-    task3 = asyncio.create_task(_helper())
 
-    await asyncio.sleep(0)
+        print(tmp.name)
+        task2 = asyncio.create_task(
+            _handle_target(tmp.name, server_reader, server_writer)
+        )
 
-    await asyncio.gather(task1, task2, task3)
+        task3 = asyncio.create_task(_helper())
+
+        await asyncio.sleep(0)
+
+        await asyncio.gather(task1, task2, task3)

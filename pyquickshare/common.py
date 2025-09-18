@@ -3,7 +3,7 @@ import atexit
 import base64
 import struct
 from enum import Enum
-from typing import Any, TypeVar
+from typing import Any, NamedTuple, TypeVar
 
 tasks: list[asyncio.Task[Any]] = []
 
@@ -48,3 +48,7 @@ def safe_assert(condition: bool, message: str | None = None) -> None:  # noqa: F
 async def read(reader: asyncio.StreamReader) -> bytes:
     (length,) = struct.unpack(">I", await reader.readexactly(4))
     return await reader.readexactly(length)
+
+class InterfaceInfo(NamedTuple):
+    ips: list[str]
+    port: int
