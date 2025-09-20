@@ -8,8 +8,9 @@ import socket
 import string
 import struct
 import time
+from collections.abc import AsyncIterator
 from logging import getLogger
-from typing import TYPE_CHECKING, AsyncIterator, Awaitable
+from typing import TYPE_CHECKING
 
 import aiofile
 import magic
@@ -43,7 +44,7 @@ from .protos import (
 from .ukey2 import Keychain, do_client_key_exchange
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from zeroconf.asyncio import AsyncServiceInfo
 

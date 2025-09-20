@@ -8,9 +8,10 @@ import pathlib
 import random
 import struct
 import typing
+from collections.abc import AsyncIterator, Awaitable, Callable
 from enum import Enum
 from logging import getLogger
-from typing import Any, AsyncIterator, Awaitable, Callable, NamedTuple, TypeVar
+from typing import Any, NamedTuple, TypeVar
 
 from cryptography.hazmat.primitives import hashes, hmac, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
