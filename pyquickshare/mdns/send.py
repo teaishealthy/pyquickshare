@@ -90,7 +90,6 @@ async def trigger_devices() -> None:
     await server.setup_task  # pyright: ignore[reportUnknownMemberType]
     bluetooth.debug("Connected to BlueZ D-Bus")  # Hello :3
 
-    await server.app.set_name(server.adapter, server.name)
     advertisement = BlueZLEAdvertisement(Type.BROADCAST, 2, server.app)
 
     advertisement.ServiceUUIDs = [SERVICE_UUID]
