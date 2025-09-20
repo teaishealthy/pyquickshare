@@ -16,6 +16,9 @@ dependencies = [
     "zeroconf>=0.145.1",
 ]
 
+[project.optional-dependencies]
+extras = ["qrcode>=8.2"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.3.4",

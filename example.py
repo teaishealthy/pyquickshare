@@ -9,7 +9,10 @@ basicConfig(level=DEBUG)
 
 
 async def send(file: str) -> None:
-    first = await anext(pyquickshare.discover_services())
+    quickshare = await pyquickshare.discover_services()
+    quickshare.qr_code.print()
+
+    first = await anext(quickshare)
 
     return await pyquickshare.send_to(first, file=file)
 

@@ -18,7 +18,6 @@ from .common import (
     Type,
     create_task,
     derive_endpoint_id_from_mac,
-    from_url64,
     generate_connection_response,
     generate_paired_key_encryption,
     iter_payload_messages,
@@ -98,15 +97,6 @@ class ReceiveMode(enum.Enum):
     WIFI = 1
     FILES = 2
     TEXT = 3
-
-
-def parse_n(n: bytes) -> tuple[bool, Type, str]:
-    n = from_url64(n.decode("utf-8"))
-    flags = n[0]
-    visible = bool(flags & 0b00000001)
-    type = Type(flags >> 1 & 0b00000111)
-    name = n[18:].decode("utf-8")
-    return visible, type, name
 
 
 def _generate_accept() -> bytes:
