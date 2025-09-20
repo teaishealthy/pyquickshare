@@ -30,6 +30,7 @@ from .common import (
     payloadify,
     pick_mac_deterministically,
     read,
+    with_semaphore,
 )
 from .mdns.receive import (
     get_interfaces,
@@ -44,7 +45,7 @@ from .protos import (
 from .ukey2 import Keychain, do_client_key_exchange
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Callable
 
     from zeroconf.asyncio import AsyncServiceInfo
 
@@ -136,14 +137,11 @@ async def _send_file(
     logger.debug("Sending file %r", file)
     file_name = path.name
 
-    sem = asyncio.Semaphore(
+    semaphore = asyncio.Semaphore(
         int((total_size // CHUNK_SIZE) * 0.9) if total_size >= CHUNK_SIZE else 1
     )
 
-    async def with_semaphore(task: Awaitable[None]) -> None:
-        async with sem:
-            await task
-
+    @with_semaphore(semaphore)
     async def write_task(offset: int) -> None:
         f.seek(offset)
         # 512KB chunks
@@ -168,9 +166,7 @@ async def _send_file(
         await writer.drain()
 
     async with aiofile.async_open(file, "rb") as f:
-        await asyncio.gather(
-            *(with_semaphore(write_task(offset)) for offset in range(0, total_size, CHUNK_SIZE))
-        )
+        await asyncio.gather(*(write_task(offset) for offset in range(0, total_size, CHUNK_SIZE)))
         await writer.drain()
 
         payload = payloadify(
