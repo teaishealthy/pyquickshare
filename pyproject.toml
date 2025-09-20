@@ -41,6 +41,8 @@ ignore = [
     "A002",   # argument shadowing a built-in
     "ANN401", # no Any
 
+    "TC006", # runtime-cast-value, i think it looks bad
+
     "TD002",
     "TD003",
     "FIX002",

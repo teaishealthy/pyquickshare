@@ -118,7 +118,7 @@ def _generate_accept() -> bytes:
     return accept.SerializeToString()
 
 
-async def _handle_client(  # noqa: C901 , PLR0912 , PLR0915 # TODO: refactor
+async def _handle_client(  # noqa: C901 PLR0912 PLR0915 # TODO: refactor
     requests: asyncio.Queue[ShareRequest],
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
