@@ -19,6 +19,9 @@ dependencies = [
     "bleak==0.22.3",
 ]
 
+[project.optional-dependencies]
+extras = ["qrcode>=8.2"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.3.4",
