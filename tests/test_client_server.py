@@ -111,6 +111,7 @@ async def test_handle_client():
     with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w") as tmp:
 
         tmp.write("Hello, world!")
+        tmp.flush()
 
         task1 = asyncio.create_task(_handle_client(queue, client_reader, client_writer))
 
