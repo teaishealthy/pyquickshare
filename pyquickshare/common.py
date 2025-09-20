@@ -337,3 +337,16 @@ def derive_endpoint_id_from_mac(mac: bytes) -> bytes:
 def pick_mac_deterministically(interfaces: list[str]) -> bytes:
     interface = sorted(interfaces)[0]
     return get_interface_mac(interface)
+
+
+def with_semaphore(
+    sem: asyncio.Semaphore,
+) -> Callable[[Callable[..., Awaitable[T]]], Callable[..., Awaitable[T]]]:
+    def deco(corof: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
+        async def wrapper(*args: Any, **kwargs: Any) -> T:
+            async with sem:
+                return await corof(*args, **kwargs)
+
+        return wrapper
+
+    return deco
