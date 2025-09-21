@@ -11,7 +11,7 @@ dependencies = [
     "bless>=0.2.6",
     "cryptography>=44.0.1",
     "dbus-next>=0.2.3",
-    "protobuf>=5.29.3",
+    "protobuf>=6.32.0",
     "python-magic>=0.4.27",
     "zeroconf>=0.145.1",
 ]
