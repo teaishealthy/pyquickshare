@@ -142,7 +142,9 @@ async def discover_services() -> _DiscoverIterator:
             async for service in discover_services():
                 print(service)
     """
-    return _DiscoverIterator()
+    iterator = _DiscoverIterator()
+    await asyncio.sleep(0)
+    return iterator
 
 
 async def _send_file(
