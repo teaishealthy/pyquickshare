@@ -64,8 +64,6 @@ class Device(NamedTuple):
 def _mime_to_type(mime_type: str) -> wire_format_pb2.FileMetadata.Type:
     namespace = mime_type.split("/")[0]
 
-    if mime_type == "application/vnd.android.package-archive":
-        return wire_format_pb2.FileMetadata.APP
     if namespace == "audio":
         return wire_format_pb2.FileMetadata.AUDIO
     if namespace == "image":
