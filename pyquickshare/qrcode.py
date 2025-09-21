@@ -48,7 +48,7 @@ class QRCode(typing.NamedTuple):
 
         Requires the `qrcode` extra to be installed.
         """
-        import qrcode
+        import qrcode  # noqa: PLC0415
 
         qr = qrcode.QRCode(box_size=10, border=4)
         qr.add_data(self.url)
