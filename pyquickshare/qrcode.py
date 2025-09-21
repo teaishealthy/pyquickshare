@@ -4,7 +4,7 @@ import struct
 import typing
 
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import ec, utils
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
@@ -54,6 +54,15 @@ class QRCode(typing.NamedTuple):
         qr.add_data(self.url)
         qr.make(fit=True)
         qr.print_ascii(invert=True)
+
+    def qr_code_handshake_data(self, auth_key: bytes) -> bytes:
+        """Internal use only."""
+        signature = self.private_key.sign(
+            auth_key,
+            ec.ECDSA(hashes.SHA256()),
+        )
+        (r, s) = utils.decode_dss_signature(signature)
+        return r.to_bytes(32, byteorder="big") + s.to_bytes(32, byteorder="big")
 
 
 class HiddenKeychain(typing.NamedTuple):

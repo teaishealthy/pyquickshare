@@ -46,7 +46,7 @@ from .qrcode import QRCode, decrypt_qrcode_record, generate_qr
 from .ukey2 import Keychain, do_client_key_exchange
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import Callable
 
     from zeroconf.asyncio import AsyncServiceInfo
 
@@ -303,13 +303,15 @@ async def send_to(device: Device, *, file: str) -> None:
 
     reader, writer = await asyncio.open_connection(address, service.port)
 
-    return await _handle_target(file, reader, writer)
+    return await _handle_target(file, reader, writer, qrcode=device.qr_code)
 
 
 async def _handle_target(  # noqa: PLR0915 # TODO: refactor
     file: str,
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
+    *,
+    qrcode: QRCode | None = None,
 ) -> None:
     endpoint_id = generate_endpoint_id()
 
@@ -355,7 +357,10 @@ async def _handle_target(  # noqa: PLR0915 # TODO: refactor
     sequence_number = make_sequence_number()
     send = make_send(writer, keychain, sequence_number)
 
-    paired_key_encryption = generate_paired_key_encryption()
+    qr_code_handshake_data = None
+    if qrcode:
+        qr_code_handshake_data = qrcode.qr_code_handshake_data(keychain.auth_string)
+    paired_key_encryption = generate_paired_key_encryption(qr_code_handshake_data)
     await send(paired_key_encryption.SerializeToString())
 
     data = await read(reader)
