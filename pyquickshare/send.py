@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import pathlib
 import random
 import socket
 import string
 import struct
 import time
-from collections.abc import AsyncIterator
 from logging import getLogger
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import aiofile
 import magic
@@ -42,10 +42,11 @@ from .protos import (
     securemessage_pb2,
     wire_format_pb2,
 )
+from .qrcode import QRCode, decrypt_qrcode_record, generate_qr
 from .ukey2 import Keychain, do_client_key_exchange
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import Callable
 
     from zeroconf.asyncio import AsyncServiceInfo
 
@@ -53,6 +54,11 @@ logger = getLogger(__name__)
 
 NAME = "pyquickshare"
 CHUNK_SIZE = 512 * 1024
+
+
+class Device(NamedTuple):
+    service_info: AsyncServiceInfo
+    qr_code: QRCode
 
 
 def _mime_to_type(mime_type: str) -> wire_format_pb2.FileMetadata.Type:
@@ -109,7 +115,25 @@ def generate_endpoint_id() -> bytes:
     )
 
 
-async def discover_services() -> AsyncIterator[AsyncServiceInfo]:
+class _DiscoverIterator:
+    def __init__(self) -> None:
+        self.qr_code = generate_qr()
+        self.queue: asyncio.Queue[AsyncServiceInfo] | None = None
+        self.task = create_task(self._discover_services())
+
+    async def _discover_services(self) -> None:
+        self.queue = await _discover_services()
+
+    async def __anext__(self) -> Device:
+        assert self.queue is not None  # noqa: S101 - escape hatch for the type checker
+        service_info = await self.queue.get()
+        return Device(service_info=service_info, qr_code=self.qr_code)
+
+    def __aenter__(self) -> _DiscoverIterator:
+        return self
+
+
+async def discover_services() -> _DiscoverIterator:
     """Discover services on the network.
 
     Example:
@@ -118,9 +142,9 @@ async def discover_services() -> AsyncIterator[AsyncServiceInfo]:
             async for service in discover_services():
                 print(service)
     """
-    queue = await _discover_services()
-    while True:
-        yield await queue.get()
+    iterator = _DiscoverIterator()
+    await asyncio.sleep(0)
+    return iterator
 
 
 async def _send_file(
@@ -198,13 +222,43 @@ async def _send_file(
     )
 
 
-async def send_to(service: AsyncServiceInfo, *, file: str) -> None:
+class DeviceMetadata(NamedTuple):
+    visible: bool
+    type: Type
+    name: str | None
+    records: dict[int, bytes]
+
+
+def _parse_n(n: bytes) -> DeviceMetadata:
+    n = from_url64(n.decode("utf-8"))
+    buffer = io.BytesIO(n)
+    flags = buffer.read(1)[0]
+    visible = bool(flags & 0b00000001)
+    device_type = Type(flags >> 1 & 0b00000111)
+    buffer.read(16)  # skip the 16 bytes of ?
+    name = None
+    if visible:
+        length = buffer.read(1)[0]
+        name = n[18:].decode("utf-8")
+
+    records: dict[int, bytes] = {}
+    while buffer.tell() < buffer.getbuffer().nbytes:
+        type_ = buffer.read(1)[0]
+        length = buffer.read(1)[0]
+        value = buffer.read(length)
+        records[type_] = value
+
+    return DeviceMetadata(visible, device_type, name, records)
+
+
+async def send_to(device: Device, *, file: str) -> None:
     """Send a file to a service.
 
     Args:
-        service (AsyncServiceInfo): The service to send the file to
+        device (Device): The device to send to
         file (str): The file to send
     """
+    service = device.service_info
     name = service.name.split(".")[0].lstrip("_")
 
     decoded = from_url64(name)
@@ -218,15 +272,19 @@ async def send_to(service: AsyncServiceInfo, *, file: str) -> None:
         logger.debug("No n record found, aborting")
         return None
 
-    n = from_url64(n_raw.decode("utf-8"))
+    n = _parse_n(n_raw)
 
-    flags = n[0]
-    _visible = bool(flags & 0b00000001)
-    type = Type(flags >> 1 & 0b00000111)
+    if n.visible is False:
+        if 1 not in n.records:
+            logger.error("Tried to connect to a hidden endpoint without a QR code record, aborting")
+            logger.error("Are you sure this is the right device?")
+            return None
 
-    name = n[18:].decode("utf-8")
+        keychain = device.qr_code.keychain()
+        name_ = decrypt_qrcode_record(n.records[1], keychain).decode("utf-8")
+        n = n._replace(name=name_)
 
-    logger.debug("Endpoint %r has name %r and type %r", peer_endpoint_id, name, type)
+    logger.debug("Endpoint %r has name %r and type %r", peer_endpoint_id, n.name, n.type)
 
     address: str | None = None
     for addr in service.addresses:
@@ -245,13 +303,15 @@ async def send_to(service: AsyncServiceInfo, *, file: str) -> None:
 
     reader, writer = await asyncio.open_connection(address, service.port)
 
-    return await _handle_target(file, reader, writer)
+    return await _handle_target(file, reader, writer, qrcode=device.qr_code)
 
 
 async def _handle_target(  # noqa: PLR0915 # TODO: refactor
     file: str,
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
+    *,
+    qrcode: QRCode | None = None,
 ) -> None:
     endpoint_id = generate_endpoint_id()
 
@@ -297,7 +357,10 @@ async def _handle_target(  # noqa: PLR0915 # TODO: refactor
     sequence_number = make_sequence_number()
     send = make_send(writer, keychain, sequence_number)
 
-    paired_key_encryption = generate_paired_key_encryption()
+    qr_code_handshake_data = None
+    if qrcode:
+        qr_code_handshake_data = qrcode.qr_code_handshake_data(keychain.auth_string)
+    paired_key_encryption = generate_paired_key_encryption(qr_code_handshake_data)
     await send(paired_key_encryption.SerializeToString())
 
     data = await read(reader)

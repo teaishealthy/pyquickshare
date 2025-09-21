@@ -16,7 +16,7 @@ from typing import Any, NamedTuple, TypeVar
 from cryptography.hazmat.primitives import hashes, hmac, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from pyquickshare.protos import (
+from .protos import (
     device_to_device_messages_pb2,
     offline_wire_formats_pb2,
     securegcm_pb2,
@@ -268,13 +268,20 @@ def make_send(
     return send
 
 
-def generate_paired_key_encryption() -> wire_format_pb2.Frame:
+def generate_paired_key_encryption(
+    qr_code_handshake_data: bytes | None = None,
+) -> wire_format_pb2.Frame:
     paired_key_encryption = wire_format_pb2.Frame()
     paired_key_encryption.v1.type = wire_format_pb2.V1Frame.PAIRED_KEY_ENCRYPTION
     paired_key_encryption.version = wire_format_pb2.Frame.V1
     paired_key_encryption.v1.paired_key_encryption.secret_id_hash = bytes(
         [0x00] * 6,
     )  # fmt: off
+    if qr_code_handshake_data:
+        paired_key_encryption.v1.paired_key_encryption.qr_code_handshake_data = (
+            qr_code_handshake_data
+        )
+
     paired_key_encryption.v1.paired_key_encryption.signed_data = bytes([0x00] * 72)
     return paired_key_encryption
 
