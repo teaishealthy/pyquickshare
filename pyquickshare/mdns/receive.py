@@ -15,7 +15,7 @@ from zeroconf import IPVersion
 from zeroconf.asyncio import AsyncServiceInfo, AsyncZeroconf
 
 from ..common import NETWORK_BASE_PATH, InterfaceInfo, Type, to_url64
-from ..firewalld import temporarily_open_port
+from ..dbus.firewalld import temporarily_open_port
 
 logger = getLogger(__name__)
 

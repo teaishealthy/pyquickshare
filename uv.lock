@@ -1,6 +1,10 @@
 version = 1
 revision = 3
 requires-python = "==3.10.*"
+resolution-markers = [
+    "sys_platform != 'emscripten'",
+    "sys_platform == 'emscripten'",
+]
 
 [[package]]
 name = "accessible-pygments"
@@ -500,7 +504,7 @@ name = "pyobjc-framework-cocoa"
 version = "10.3.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyobjc-core" },
+    { name = "pyobjc-core", marker = "sys_platform != 'emscripten'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/39/41/4f09a5e9a6769b4dafb293ea597ed693cc0def0e07867ad0a42664f530b6/pyobjc_framework_cocoa-10.3.2.tar.gz", hash = "sha256:673968e5435845bef969bfe374f31a1a6dc660c98608d2b84d5cae6eafa5c39d", size = 4942530, upload-time = "2024-11-30T15:30:27.244Z" }
 wheels = [
@@ -512,8 +516,8 @@ name = "pyobjc-framework-corebluetooth"
 version = "10.3.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyobjc-core" },
-    { name = "pyobjc-framework-cocoa" },
+    { name = "pyobjc-core", marker = "sys_platform != 'emscripten'" },
+    { name = "pyobjc-framework-cocoa", marker = "sys_platform != 'emscripten'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/13/ca/35d205c3e153e7bc59a417560a45e27a2410439e6f78390f97c1a996c922/pyobjc_framework_corebluetooth-10.3.2.tar.gz", hash = "sha256:c0a077bc3a2466271efa382c1e024630bc43cc6f9ab8f3f97431ad08b1ad52bb", size = 50622, upload-time = "2024-11-30T15:32:18.741Z" }
 wheels = [
@@ -528,8 +532,8 @@ name = "pyobjc-framework-libdispatch"
 version = "10.3.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyobjc-core" },
-    { name = "pyobjc-framework-cocoa" },
+    { name = "pyobjc-core", marker = "sys_platform != 'emscripten'" },
+    { name = "pyobjc-framework-cocoa", marker = "sys_platform != 'emscripten'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/4d/12/a908f3f94952c8c9e3d6e6bd425613a79692e7d400557ede047992439edc/pyobjc_framework_libdispatch-10.3.2.tar.gz", hash = "sha256:e9f4311fbf8df602852557a98d2a64f37a9d363acf4d75634120251bbc7b7304", size = 45132, upload-time = "2024-11-30T17:09:47.135Z" }
 wheels = [

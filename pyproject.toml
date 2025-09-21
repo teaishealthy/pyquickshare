@@ -14,7 +14,6 @@ dependencies = [
     "protobuf>=5.29.3",
     "python-magic>=0.4.27",
     "zeroconf>=0.145.1",
-
     # need to pin bleak (dependency of bless)
     "bleak==0.22.3",
 ]

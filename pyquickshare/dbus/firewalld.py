@@ -1,34 +1,16 @@
 """Module to command firewalld to open a port to allow incoming connections temporarily."""
 
 import logging
-from typing import Any
 
 from dbus_next.aio.message_bus import MessageBus
 from dbus_next.constants import BusType
+
+from .dbus import get_proxy_object
 
 logger = logging.getLogger(__name__)
 
 
 __all__ = ("temporarily_open_port",)
-
-
-async def get_proxy_object(
-    bus: MessageBus,
-    name: str,
-    path: str,
-    introspection: Any = None,
-) -> Any:
-    if introspection is None:
-        introspection = await bus.introspect(
-            name,
-            path,
-        )
-
-    return bus.get_proxy_object(
-        name,
-        path,
-        introspection,
-    )
 
 
 async def temporarily_open_port(interface: str, port: int = 8080) -> None:
