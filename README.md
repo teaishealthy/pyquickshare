@@ -6,7 +6,7 @@
 ![Coveralls](https://img.shields.io/coverallsCoverage/github/teaishealthy/pyquickshare?style=flat-square)
 
 
-An implementation of Quick Share in Python.
+An asynchronous Python implementation of the Android Quick Share (Nearby Share) protocol
 
 ## System requirements
 
@@ -29,7 +29,10 @@ Communication with `firewalld` is done over D-Bus, `polkit` may prompt for authe
 ## Installation
 
 ```bash
-pip install git+https://github.com/teaishealthy/pyquickshare
+pip install pyquickshare
+
+# or, to install with extras (QR code support)
+pip install pyquickshare[extras]
 ```
 
 ## Features
