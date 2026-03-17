@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path("..").resolve()))
 
 project = "pyquickshare"
-copyright = "2025, teaishealthy"
+copyright = "2026, teaishealthy"
 author = "teaishealthy"
 
 # -- General configuration ---------------------------------------------------
