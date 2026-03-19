@@ -6,6 +6,12 @@ resolution-markers = [
     "sys_platform == 'emscripten'",
 ]
 
+[manifest]
+members = [
+    "bluez-rfcomm",
+    "pyquickshare",
+]
+
 [[package]]
 name = "accessible-pygments"
 version = "0.0.5"
@@ -120,6 +126,11 @@ sdist = { url = "https://files.pythonhosted.org/packages/f2/2a/7661d3f497be63510
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ac/da/69e33c374d19d4538afccd52eefc8a163486d438970acca40bd9c4794e49/bless-0.2.6-py3-none-any.whl", hash = "sha256:2b4b4ce8ee70a987886f22ca369e2093624aea315abe609bd01499f2d16056d1", size = 36285, upload-time = "2024-03-06T23:27:22.033Z" },
 ]
+
+[[package]]
+name = "bluez-rfcomm"
+version = "0.1.0"
+source = { editable = "packages/bluez_rfcomm" }
 
 [[package]]
 name = "caio"
@@ -548,6 +559,7 @@ dependencies = [
     { name = "aiofile" },
     { name = "bleak" },
     { name = "bless" },
+    { name = "bluez-rfcomm" },
     { name = "cryptography" },
     { name = "dbus-next" },
     { name = "protobuf" },
@@ -578,6 +590,7 @@ requires-dist = [
     { name = "aiofile", specifier = ">=3.9.0" },
     { name = "bleak", specifier = "==0.22.3" },
     { name = "bless", specifier = ">=0.2.6" },
+    { name = "bluez-rfcomm", editable = "packages/bluez_rfcomm" },
     { name = "cryptography", specifier = ">=44.0.1" },
     { name = "dbus-next", specifier = ">=0.2.3" },
     { name = "protobuf", specifier = ">=6.32.0" },

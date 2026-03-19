@@ -40,7 +40,7 @@ pip install pyquickshare[extras]
 Receive is fully implemented, namely WiFi credentials, files, and text. Sending only supports files, but support for sending text and WiFi credentials is planned.
 
 ### Transfer
-Only LAN/Wifi is supported at the moment, but Bluetooth is planned.
+Quick Share supports two "bare" transports: WiFi/Lan and Bluetooth Classic. Bluetooth Classic *can* transfer files, but can also be used to trigger an upgrade to a faster medium (e.g. WiFi Direct or Hotspot).
 
 ### Discovery
 pyquickshare uses mDNS to discover other devices on the local network. BLE is only used to trigger advertisment at the moment.

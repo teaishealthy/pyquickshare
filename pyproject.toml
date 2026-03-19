@@ -16,6 +16,7 @@ dependencies = [
     "zeroconf>=0.145.1",
     # need to pin bleak (dependency of bless)
     "bleak==0.22.3",
+    "bluez-rfcomm",
 ]
 
 keywords = [
@@ -116,6 +117,14 @@ exclude_also = ["pragma: no cover", "if TYPE_CHECKING:"]
 
 [tool.pytest.ini_options]
 asyncio_default_fixture_loop_scope = "session"
+
+[tool.uv.workspace]
+members = [
+    "packages/bluez_rfcomm",
+]
+
+[tool.uv.sources]
+bluez-rfcomm = { workspace = true, editable = true }
 
 [build-system]
 requires = ["hatchling"]

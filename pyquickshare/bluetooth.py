@@ -1,15 +1,14 @@
 import asyncio
-import contextlib
 import logging
-from pprint import pprint
-from typing import Any
+import socket
+from dataclasses import dataclass
+from typing import Any, AsyncGenerator, cast
 
+import bluez_rfcomm as rfcomm  # pyright: ignore[reportMissingTypeStubs]
 from dbus_next.aio.message_bus import MessageBus
 from dbus_next.constants import BusType
-from dbus_next.signature import Variant
 
-from .dbus import get_proxy_object
-from .untyped import Profile
+from .dbus.dbus import get_proxy_object
 
 logger = logging.getLogger(__name__)
 
@@ -17,20 +16,21 @@ logger = logging.getLogger(__name__)
 BLEUTOOTH_QUICKSHARE_UUID = "a82efa21-ae5c-3dde-9bbc-f16da7b16c5a"
 BLEUTOOTH_QUICKSHARE_RECEIVE_UUID = "0000fef3-0000-1000-8000-00805f9b34fb"
 BLUETOOTH_QUICKSHARE_NEW_UUID = "00001101-0000-1000-8000-00805f9b34fb"
-UUIDS = [BLEUTOOTH_QUICKSHARE_UUID, BLEUTOOTH_QUICKSHARE_RECEIVE_UUID, BLUETOOTH_QUICKSHARE_NEW_UUID]
-PROFILE_PATH = "/de/pyquickshare/bluetooth/profile"
-OPTIONS = {uuid: {
-        "Name": Variant("s", f"PyQuickShare {uuid[-4:]}"),
-        "Channel": Variant("q", 0),
-        "RequireAuthentication": Variant("b", False),
-        "RequireAuthorization": Variant("b", False),
-        "AutoConnect": Variant("b", True),
-        "PSM": Variant("q", 0),
-    } for uuid in UUIDS}
-pprint(OPTIONS)
+UUIDS = [
+    BLEUTOOTH_QUICKSHARE_UUID,
+    BLEUTOOTH_QUICKSHARE_RECEIVE_UUID,
+    BLUETOOTH_QUICKSHARE_NEW_UUID,
+]
 
 
-async def tinker():
+@dataclass
+class BluetoothDevice:
+    name: str
+    address: str
+    channel: int
+
+
+async def find_receiving_devices() -> AsyncGenerator[BluetoothDevice, None]:
     logger.debug("Connecting to the system bus")
     bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
     logger.info("Connected to the system bus")
@@ -40,19 +40,6 @@ async def tinker():
         "org.bluez",
         "/",
     )
-    bluez = await get_proxy_object(
-        bus,
-        "org.bluez",
-        "/org/bluez",
-    )
-
-    profile_manager = bluez.get_interface("org.bluez.ProfileManager1")
-    for uuid, option in OPTIONS.items():
-        profile = Profile()
-        profile_path = f"{PROFILE_PATH}/{uuid.replace('-', '_')}"
-        bus.export(profile_path, profile)
-        logger.debug("Registering profile with uuid %s", uuid)
-        await profile_manager.call_register_profile(profile_path, uuid, option)
 
     object_manager = bluez_root.get_interface("org.freedesktop.DBus.ObjectManager")
     objects = await object_manager.call_get_managed_objects()
@@ -68,7 +55,6 @@ async def tinker():
         logger.error("No Bluetooth adapter found")
         return
 
-
     queue: asyncio.Queue[str] = asyncio.Queue()
 
     for path, interface in objects.items():
@@ -81,7 +67,6 @@ async def tinker():
     adapter = adapter_proxy.get_interface("org.bluez.Adapter1")
     await adapter.call_start_discovery()
 
-
     while True:
         path = await queue.get()
         device_proxy = await get_proxy_object(bus, "org.bluez", path)
@@ -91,13 +76,14 @@ async def tinker():
             name = await device.get_name()
             address = await device.get_address()
             logger.info("Found QuickShare device: %s (%s) at %s", name, address, path)
-            await device.set_trusted(True)
-            print("Trusted?", await device.get_trusted())
-            for uuid in UUIDS:
-                if uuid in uuids:
-                    logger.info("Connecting to profile %s", uuid)
-                    #await device.call_connect_profile(uuid)
-            logger.exception("No more profiles to connect")
+
+            channel = cast(
+                int,
+                rfcomm.find_rfcomm_channel(address, BLEUTOOTH_QUICKSHARE_UUID),  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
+            )
+
+            yield BluetoothDevice(name, address, channel)
+
 
 def register_new_devices(object_manager: Any, queue: asyncio.Queue[str]) -> None:
     def on_interfaces_added(object_path: str, interfaces: dict[str, Any]) -> None:
@@ -106,6 +92,28 @@ def register_new_devices(object_manager: Any, queue: asyncio.Queue[str]) -> None
             queue.put_nowait(object_path)
 
     object_manager.on_interfaces_added(on_interfaces_added)
+
+
+async def connect_device(device: BluetoothDevice) -> socket.socket:
+    logger.info(
+        "Connecting to device %s (%s) on channel %d", device.name, device.address, device.channel
+    )
+
+    sock = cast(socket.socket, rfcomm.open_rfcomm_socket())  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
+    rfcomm.connect_rfcomm(sock.fileno(), device.address, device.channel)  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
+    logger.info(
+        "Connected to device %s (%s) on channel %d", device.name, device.address, device.channel
+    )
+
+    return sock
+
+
+async def tinker() -> None:
+    async for device in find_receiving_devices():
+        sock = await connect_device(device)
+        sock.close()
+        break
+
 
 if __name__ == "__main__":
     import asyncio
