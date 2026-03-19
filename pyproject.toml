@@ -16,7 +16,6 @@ dependencies = [
     "zeroconf>=0.145.1",
     # need to pin bleak (dependency of bless)
     "bleak==0.22.3",
-    "bluez-rfcomm",
 ]
 
 keywords = [
@@ -35,7 +34,6 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Operating System :: Android",
     "Development Status :: 3 - Alpha",
@@ -118,14 +116,9 @@ exclude_also = ["pragma: no cover", "if TYPE_CHECKING:"]
 [tool.pytest.ini_options]
 asyncio_default_fixture_loop_scope = "session"
 
-[tool.uv.workspace]
-members = [
-    "packages/bluez_rfcomm",
-]
-
-[tool.uv.sources]
-bluez-rfcomm = { workspace = true, editable = true }
-
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["scikit-build-core>=0.10", "pybind11>=2.13"]
+build-backend = "scikit_build_core.build"
+
+[tool.scikit-build]
+wheel.packages = ["pyquickshare"]
