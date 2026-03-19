@@ -1,0 +1,17 @@
+[project]
+name = "bluez-rfcomm"
+version = "0.1.0"
+description = "pybind11 bindings for BlueZ RFCOMM C API"
+requires-python = "~=3.10.0"
+license = "MIT"
+
+[build-system]
+requires = [
+    "scikit-build-core>=0.10",
+    "pybind11>=2.13",
+]
+build-backend = "scikit_build_core.build"
+
+[tool.scikit-build]
+wheel.packages = ["src/bluez_rfcomm"]
+build-dir = "build/{wheel_tag}"

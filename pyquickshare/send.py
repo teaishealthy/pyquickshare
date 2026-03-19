@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import aiofile
 import magic
 
+from .bluetooth import BluetoothDevice, connect_device, find_receiving_devices
 from .common import (
     Type,
     create_task,
