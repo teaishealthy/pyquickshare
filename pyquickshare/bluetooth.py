@@ -4,10 +4,10 @@ import socket
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, cast
 
-import bluez_rfcomm as rfcomm  # pyright: ignore[reportMissingTypeStubs]
 from dbus_next.aio.message_bus import MessageBus
 from dbus_next.constants import BusType
 
+from . import rfcomm
 from .dbus.dbus import get_proxy_object
 
 logger = logging.getLogger(__name__)
@@ -94,12 +94,12 @@ def register_new_devices(object_manager: Any, queue: asyncio.Queue[str]) -> None
     object_manager.on_interfaces_added(on_interfaces_added)
 
 
-async def connect_device(device: BluetoothDevice) -> socket.socket:
+async def connect_bluetooth_device(device: BluetoothDevice) -> socket.socket:
     logger.info(
         "Connecting to device %s (%s) on channel %d", device.name, device.address, device.channel
     )
 
-    sock = cast(socket.socket, rfcomm.open_rfcomm_socket())  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
+    sock = rfcomm.open_rfcomm_socket()
     rfcomm.connect_rfcomm(sock.fileno(), device.address, device.channel)  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
     logger.info(
         "Connected to device %s (%s) on channel %d", device.name, device.address, device.channel
@@ -110,7 +110,7 @@ async def connect_device(device: BluetoothDevice) -> socket.socket:
 
 async def tinker() -> None:
     async for device in find_receiving_devices():
-        sock = await connect_device(device)
+        sock = await connect_bluetooth_device(device)
         sock.close()
         break
 

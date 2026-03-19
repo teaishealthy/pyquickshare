@@ -18,26 +18,18 @@ extern "C" {
 
 namespace py = pybind11;
 
-// Raise OSError from the current errno value.
 static void throw_errno(const char *what) {
     throw std::system_error(errno, std::generic_category(), what);
 }
 
-// Parse a UUID string into a BlueZ uuid_t.
-// Accepts:
-//   "1101"       or "0x1101"  → 16-bit UUID
-//   "12345678"   or "0x12345678" → 32-bit UUID
-//   "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" → 128-bit UUID
 static uuid_t parse_uuid(const std::string &s) {
     uuid_t u;
     std::string t = s;
 
-    // Strip optional "0x" prefix for short forms
     if (t.size() >= 2 && (t.substr(0, 2) == "0x" || t.substr(0, 2) == "0X"))
         t = t.substr(2);
 
     if (t.find('-') == std::string::npos) {
-        // Short form: hex digits only
         if (t.size() > 8)
             throw std::invalid_argument("invalid UUID (too many hex digits): " + s);
         uint32_t val = std::stoul(t, nullptr, 16);
@@ -48,7 +40,6 @@ static uuid_t parse_uuid(const std::string &s) {
         return u;
     }
 
-    // Full 128-bit form: strip dashes and parse 16 bytes
     std::string hex;
     for (char c : s)
         if (c != '-') hex += c;
@@ -64,9 +55,6 @@ static uuid_t parse_uuid(const std::string &s) {
 PYBIND11_MODULE(_rfcomm, m) {
     m.doc() = "pybind11 bindings for the BlueZ RFCOMM C API";
 
-    // -------------------------------------------------------------------------
-    // bdaddr_t
-    // -------------------------------------------------------------------------
     py::class_<bdaddr_t>(m, "bdaddr_t")
         .def(py::init([]() {
             bdaddr_t addr;
@@ -96,9 +84,6 @@ PYBIND11_MODULE(_rfcomm, m) {
             return bacmp(&a, &b) != 0;
         });
 
-    // -------------------------------------------------------------------------
-    // sockaddr_rc
-    // -------------------------------------------------------------------------
     py::class_<sockaddr_rc>(m, "sockaddr_rc")
         .def(py::init([]() {
             sockaddr_rc addr;
@@ -110,9 +95,7 @@ PYBIND11_MODULE(_rfcomm, m) {
         .def_readwrite("rc_bdaddr",  &sockaddr_rc::rc_bdaddr)
         .def_readwrite("rc_channel", &sockaddr_rc::rc_channel);
 
-    // -------------------------------------------------------------------------
-    // bt_security
-    // -------------------------------------------------------------------------
+
     py::class_<bt_security>(m, "bt_security")
         .def(py::init([]() {
             bt_security sec;
@@ -123,19 +106,16 @@ PYBIND11_MODULE(_rfcomm, m) {
         .def(py::init([](uint8_t level, uint8_t key_size) {
             bt_security sec;
             sec.level    = level;
-            sec.key_size = key_size;
+            sec.key_size = key_size;    
             return sec;
         }), py::arg("level"), py::arg("key_size") = uint8_t(0))
         .def_readwrite("level",    &bt_security::level)
         .def_readwrite("key_size", &bt_security::key_size)
-        // Pack to raw bytes for use with setsockopt_bytes()
         .def("pack", [](const bt_security &self) {
             return py::bytes(reinterpret_cast<const char *>(&self), sizeof(self));
         });
 
-    // -------------------------------------------------------------------------
-    // rfcomm_conninfo
-    // -------------------------------------------------------------------------
+
     py::class_<rfcomm_conninfo>(m, "rfcomm_conninfo")
         .def(py::init([]() {
             rfcomm_conninfo info;
@@ -154,7 +134,6 @@ PYBIND11_MODULE(_rfcomm, m) {
                     throw std::invalid_argument("dev_class must be exactly 3 bytes");
                 memcpy(self.dev_class, s.data(), 3);
             })
-        // Unpack from raw bytes returned by getsockopt_bytes()
         .def_static("unpack", [](py::bytes raw) {
             auto s = static_cast<std::string>(raw);
             if (s.size() < sizeof(rfcomm_conninfo))
@@ -164,9 +143,6 @@ PYBIND11_MODULE(_rfcomm, m) {
             return info;
         }, py::arg("raw"));
 
-    // -------------------------------------------------------------------------
-    // libbluetooth helpers
-    // -------------------------------------------------------------------------
     m.def("str2ba", [](const std::string &str) {
         bdaddr_t ba;
         if (::str2ba(str.c_str(), &ba) != 0)
@@ -181,7 +157,6 @@ PYBIND11_MODULE(_rfcomm, m) {
         return std::string(str);
     }, py::arg("ba"), "Format a bdaddr_t as a colon-separated address string.");
 
-    // bacpy and bacmp are static inline in bluetooth.h — called directly.
     m.def("bacpy", [](bdaddr_t &dst, const bdaddr_t &src) {
         ::bacpy(&dst, &src);
     }, py::arg("dst"), py::arg("src"), "Copy src into dst (in-place mutation of dst).");
@@ -189,14 +164,6 @@ PYBIND11_MODULE(_rfcomm, m) {
     m.def("bacmp", [](const bdaddr_t &ba1, const bdaddr_t &ba2) {
         return ::bacmp(&ba1, &ba2);
     }, py::arg("ba1"), py::arg("ba2"), "Compare two bdaddr_t values; 0 if equal.");
-
-    // -------------------------------------------------------------------------
-    // Socket helpers
-    //
-    // We do NOT re-wrap the full POSIX socket API — use socket.socket(fileno=fd)
-    // to get a Python socket object compatible with asyncio. We only wrap the
-    // BlueZ-specific parts that Python's socket module cannot handle.
-    // -------------------------------------------------------------------------
 
     m.def("make_rfcomm_socket", []() {
         int fd = ::socket(AF_BLUETOOTH, SOCK_STREAM, BTPROTO_RFCOMM);
@@ -250,9 +217,6 @@ PYBIND11_MODULE(_rfcomm, m) {
         }, py::arg("fd"), py::arg("level"), py::arg("optname"), py::arg("buflen"),
         "getsockopt wrapper that returns raw bytes (pass to rfcomm_conninfo.unpack()).");
 
-    // -------------------------------------------------------------------------
-    // SDP service discovery
-    // -------------------------------------------------------------------------
 
     m.def("find_rfcomm_channel",
         [](const std::string &remote_str, const std::string &uuid_str) -> int {
@@ -262,15 +226,13 @@ PYBIND11_MODULE(_rfcomm, m) {
 
             uuid_t svc_uuid = parse_uuid(uuid_str);
 
-            // Connect to the remote SDP server; zeroed src lets BlueZ pick the adapter.
-            // SDP_RETRY_IF_BUSY makes this a blocking call.
-            bdaddr_t src = {};  // equivalent to BDADDR_ANY — all zeros
+            bdaddr_t src = {};
             sdp_session_t *session = sdp_connect(&src, &remote, SDP_RETRY_IF_BUSY);
             if (!session)
                 throw_errno("sdp_connect");
 
             sdp_list_t *search  = sdp_list_append(nullptr, &svc_uuid);
-            uint32_t    range   = 0x0000FFFF;   // fetch all attributes
+            uint32_t    range   = 0x0000FFFF;
             sdp_list_t *attrid  = sdp_list_append(nullptr, &range);
             sdp_list_t *records = nullptr;
 
@@ -315,24 +277,15 @@ PYBIND11_MODULE(_rfcomm, m) {
         "Raises OSError if the SDP connection fails, RuntimeError if not found.\n"
         "This call blocks until the SDP query completes.");
 
-    // -------------------------------------------------------------------------
-    // Constants
-    // -------------------------------------------------------------------------
-
-    // Protocol family / socket type
-    // Cast to int: SOCK_STREAM and SOCK_SEQPACKET are enum values on Linux
-    // and pybind11 won't implicitly convert them to Python ints without a cast.
     m.attr("AF_BLUETOOTH")   = int(AF_BLUETOOTH);
     m.attr("PF_BLUETOOTH")   = int(PF_BLUETOOTH);
     m.attr("BTPROTO_RFCOMM") = int(BTPROTO_RFCOMM);
     m.attr("SOCK_STREAM")    = int(SOCK_STREAM);
     m.attr("SOCK_SEQPACKET") = int(SOCK_SEQPACKET);
 
-    // Socket option levels
     m.attr("SOL_BLUETOOTH")  = int(SOL_BLUETOOTH);
     m.attr("SOL_RFCOMM")     = int(SOL_RFCOMM);
 
-    // BT_SECURITY option name + level constants
     m.attr("BT_SECURITY")        = int(BT_SECURITY);
     m.attr("BT_SECURITY_SDP")    = int(BT_SECURITY_SDP);
     m.attr("BT_SECURITY_LOW")    = int(BT_SECURITY_LOW);
@@ -340,7 +293,6 @@ PYBIND11_MODULE(_rfcomm, m) {
     m.attr("BT_SECURITY_HIGH")   = int(BT_SECURITY_HIGH);
     m.attr("BT_SECURITY_FIPS")   = int(BT_SECURITY_FIPS);
 
-    // RFCOMM socket options
     m.attr("RFCOMM_CONNINFO")      = int(RFCOMM_CONNINFO);
     m.attr("RFCOMM_LM")            = int(RFCOMM_LM);
     m.attr("RFCOMM_LM_MASTER")     = int(RFCOMM_LM_MASTER);
@@ -350,11 +302,9 @@ PYBIND11_MODULE(_rfcomm, m) {
     m.attr("RFCOMM_LM_RELIABLE")   = int(RFCOMM_LM_RELIABLE);
     m.attr("RFCOMM_LM_SECURE")     = int(RFCOMM_LM_SECURE);
 
-    // RFCOMM defaults
     m.attr("RFCOMM_DEFAULT_MTU") = int(RFCOMM_DEFAULT_MTU);
     m.attr("RFCOMM_PSM")         = int(RFCOMM_PSM);
 
-    // Shutdown flags
     m.attr("SHUT_RD")   = int(SHUT_RD);
     m.attr("SHUT_WR")   = int(SHUT_WR);
     m.attr("SHUT_RDWR") = int(SHUT_RDWR);

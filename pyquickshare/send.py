@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import abc
 import asyncio
 import contextlib
 import io
@@ -15,7 +16,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import aiofile
 import magic
 
-from .bluetooth import BluetoothDevice, connect_device, find_receiving_devices
+from .bluetooth import BluetoothDevice, connect_bluetooth_device, find_receiving_devices
 from .common import (
     Type,
     create_task,
@@ -57,10 +58,79 @@ NAME = "pyquickshare"
 CHUNK_SIZE = 512 * 1024
 
 
-class Device(NamedTuple):
-    service_info: AsyncServiceInfo
-    qr_code: QRCode
+class Connectable(abc.ABC):
+    @abc.abstractmethod
+    async def connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None: ...
 
+
+class WifiConnectable(Connectable):
+    def __init__(self, *, service_info: AsyncServiceInfo, qr_code: QRCode) -> None:
+        self.service_info = service_info
+        self.qr_code = qr_code
+
+    async def connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None:
+        service = self.service_info
+
+        name = service.name.split(".")[0].lstrip("_")
+
+        decoded = from_url64(name)
+        peer_endpoint_id = decoded[1:5].decode("ascii")
+
+        logger.debug("Discovered endpoint %r", peer_endpoint_id)
+
+        n_raw = service.properties.get(b"n")
+
+        if n_raw is None:
+            logger.debug("No n record found, aborting")
+            return None
+
+        n = _parse_n(n_raw)
+
+        if n.visible is False:
+            if 1 not in n.records:
+                logger.error(
+                    "Tried to connect to a hidden endpoint without a QR code record, aborting"
+                )
+                logger.error("Are you sure this is the right device?")
+                return None
+
+            keychain = self.qr_code.keychain()
+            name_ = decrypt_qrcode_record(n.records[1], keychain).decode("utf-8")
+            n = n._replace(name=name_)
+
+        logger.debug("Endpoint %r has name %r and type %r", peer_endpoint_id, n.name, n.type)
+
+        address: str | None = None
+        for addr in service.addresses:
+            try:
+                address = socket.inet_ntoa(addr)
+                socket.gethostbyaddr(address)
+                break
+            except socket.herror:
+                logger.debug("Address %r is not resolvable", address)
+
+        if address is None:
+            logger.error("No resolvable addresses found, aborting")
+            return None
+
+        logger.debug("Connecting to %s:%d", address, service.port)
+
+        return await asyncio.open_connection(address, service.port)
+
+class BluetoothConnectable(Connectable):
+    def __init__(self, device: BluetoothDevice) -> None:
+        self.device = device
+
+    async def connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None:
+        logger.debug("Connecting to Bluetooth device %r", self.device)
+        try:
+            sock = await connect_bluetooth_device(self.device)
+        except Exception:
+            logger.exception("Failed to connect to Bluetooth device: %s")
+            return None
+
+        reader, writer = await asyncio.open_connection(sock=sock)
+        return reader, writer
 
 def _mime_to_type(mime_type: str) -> wire_format_pb2.FileMetadata.Type:
     namespace = mime_type.split("/")[0]
@@ -117,23 +187,36 @@ def generate_endpoint_id() -> bytes:
 class _DiscoverIterator:
     def __init__(self) -> None:
         self.qr_code = generate_qr()
-        self.queue: asyncio.Queue[AsyncServiceInfo] | None = None
-        self.task = create_task(self._discover_services())
+        self.queue: asyncio.Queue[Connectable] | None = None
 
-    async def _discover_services(self) -> None:
-        self.queue = await _discover_services()
+    async def start(self) -> None:
+        self.queue = asyncio.Queue()
 
-    async def __anext__(self) -> Device:
+        for task in [self._wifi(self.queue), self._bluetooth(self.queue)]:
+            create_task(task)
+
+    async def _wifi(self, queue: asyncio.Queue[Connectable]) -> None:
+        local_queue = await _discover_services()
+        while True:
+            service_info = await local_queue.get()
+            connectable = WifiConnectable(service_info=service_info, qr_code=self.qr_code)
+            await queue.put(connectable)
+
+    async def _bluetooth(self, queue: asyncio.Queue[Connectable]) -> None:
+        async for device in find_receiving_devices():
+            connectable = BluetoothConnectable(device=device)
+            await queue.put(connectable)
+
+    async def __anext__(self) -> Connectable:
         assert self.queue is not None  # noqa: S101 - escape hatch for the type checker
-        service_info = await self.queue.get()
-        return Device(service_info=service_info, qr_code=self.qr_code)
+        return await self.queue.get()
 
     def __aenter__(self) -> _DiscoverIterator:
         return self
 
 
 async def discover_services() -> _DiscoverIterator:
-    """Discover services on the network.
+    """Discover Quick Share devices.
 
     Example:
         .. code-block:: python
@@ -142,6 +225,7 @@ async def discover_services() -> _DiscoverIterator:
                 print(service)
     """
     iterator = _DiscoverIterator()
+    await iterator.start()
     await asyncio.sleep(0)
     return iterator
 
@@ -250,59 +334,27 @@ def _parse_n(n: bytes) -> DeviceMetadata:
     return DeviceMetadata(visible, device_type, name, records)
 
 
-async def send_to(device: Device, *, file: str) -> None:
-    """Send a file to a service.
+async def send_to(device: Connectable, *, file: str) -> None:
+    """Send a file to a device.
 
     Args:
         device (Device): The device to send to
         file (str): The file to send
     """
-    service = device.service_info
-    name = service.name.split(".")[0].lstrip("_")
+    maybe = await device.connect()
 
-    decoded = from_url64(name)
-    peer_endpoint_id = decoded[1:5].decode("ascii")
-
-    logger.debug("Discovered endpoint %r", peer_endpoint_id)
-
-    n_raw = service.properties.get(b"n")
-
-    if n_raw is None:
-        logger.debug("No n record found, aborting")
+    if maybe is None:
+        logger.error("Failed to connect to the device")
         return None
 
-    n = _parse_n(n_raw)
+    reader, writer = maybe
 
-    if n.visible is False:
-        if 1 not in n.records:
-            logger.error("Tried to connect to a hidden endpoint without a QR code record, aborting")
-            logger.error("Are you sure this is the right device?")
-            return None
 
-        keychain = device.qr_code.keychain()
-        name_ = decrypt_qrcode_record(n.records[1], keychain).decode("utf-8")
-        n = n._replace(name=name_)
+    qr_code = None
+    if isinstance(device, WifiConnectable):
+        qr_code = device.qr_code
 
-    logger.debug("Endpoint %r has name %r and type %r", peer_endpoint_id, n.name, n.type)
-
-    address: str | None = None
-    for addr in service.addresses:
-        try:
-            address = socket.inet_ntoa(addr)
-            socket.gethostbyaddr(address)
-            break
-        except socket.herror:
-            logger.debug("Address %r is not resolvable", address)
-
-    if address is None:
-        logger.error("No resolvable addresses found, aborting")
-        return None
-
-    logger.debug("Connecting to %s:%d", address, service.port)
-
-    reader, writer = await asyncio.open_connection(address, service.port)
-
-    return await _handle_target(file, reader, writer, qrcode=device.qr_code)
+    return await _handle_target(file, reader, writer, qrcode=qr_code)
 
 
 async def _handle_target(  # noqa: PLR0915 # TODO: refactor
