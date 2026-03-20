@@ -1,6 +1,6 @@
 import socket as _socket
 
-from ._rfcomm import (
+from pyquickshare.rfcomm._rfcomm import (  # pyright: ignore[reportMissingModuleSource]
     AF_BLUETOOTH,
     BT_SECURITY,
     BT_SECURITY_FIPS,
@@ -44,21 +44,6 @@ from ._rfcomm import (
 )
 
 __all__ = [
-    "bdaddr_t",
-    "bt_security",
-    "rfcomm_conninfo",
-    "sockaddr_rc",
-    "ba2str",
-    "bacmp",
-    "bacpy",
-    "str2ba",
-    "bind_rfcomm",
-    "connect_rfcomm",
-    "getsockopt_bytes",
-    "make_rfcomm_socket",
-    "find_rfcomm_channel",
-    "open_rfcomm_socket",
-    "setsockopt_bytes",
     "AF_BLUETOOTH",
     "BTPROTO_RFCOMM",
     "BT_SECURITY",
@@ -85,6 +70,21 @@ __all__ = [
     "SOCK_STREAM",
     "SOL_BLUETOOTH",
     "SOL_RFCOMM",
+    "ba2str",
+    "bacmp",
+    "bacpy",
+    "bdaddr_t",
+    "bind_rfcomm",
+    "bt_security",
+    "connect_rfcomm",
+    "find_rfcomm_channel",
+    "getsockopt_bytes",
+    "make_rfcomm_socket",
+    "open_rfcomm_socket",
+    "rfcomm_conninfo",
+    "setsockopt_bytes",
+    "sockaddr_rc",
+    "str2ba",
 ]
 
 
