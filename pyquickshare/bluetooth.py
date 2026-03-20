@@ -107,18 +107,3 @@ async def connect_bluetooth_device(device: BluetoothDevice) -> socket.socket:
     )
 
     return sock
-
-
-async def tinker() -> None:
-    async for device in find_receiving_devices():
-        sock = await connect_bluetooth_device(device)
-        sock.close()
-        break
-
-
-if __name__ == "__main__":
-    import asyncio
-
-    logging.basicConfig(level=logging.DEBUG)
-
-    asyncio.run(tinker())
