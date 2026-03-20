@@ -28,6 +28,18 @@ Communication with `firewalld` is done over D-Bus, `polkit` may prompt for authe
 
 ## Installation
 
+Depending on your Linux distribution, you may need to install some development packages to build the C++ extension module:
+
+| Distro          | Package                                                             |
+| --------------- | ------------------------------------------------------------------- |
+| Debian / Ubuntu | `python3-dev` `libbluetooth-dev` `cmake` `pkgconf`                 |
+| Arch            | `python` `bluez` `cmake` `pkgconf`                                 |
+| Fedora / RHEL   | `python3-devel` `bluez-libs-devel` `cmake` `pkgconf-pkg-config`    |
+| Alpine          | `python3-dev` `bluez-dev` `cmake` `pkgconf`                        |
+
+
+Now you can install pyquickshare using pip:
+
 ```bash
 pip install pyquickshare
 
@@ -40,7 +52,7 @@ pip install pyquickshare[extras]
 Receive is fully implemented, namely WiFi credentials, files, and text. Sending only supports files, but support for sending text and WiFi credentials is planned.
 
 ### Transfer
-Only LAN/Wifi is supported at the moment, but Bluetooth is planned.
+Quick Share supports two "bare" transports: WiFi/Lan and Bluetooth Classic. Bluetooth Classic *can* transfer files, but can also be used to trigger an upgrade to a faster medium (e.g. WiFi Direct or Hotspot).
 
 ### Discovery
 pyquickshare uses mDNS to discover other devices on the local network. BLE is only used to trigger advertisment at the moment.
@@ -58,6 +70,13 @@ uv run example.py receive
 uv run example.py send <file>
 ```
 
+## Development
+
+Make sure you installed the system dependencies mentioned in the installation section. Now sync with:
+
+```bash
+uv sync --dev --all-extras
+```
 
 ## Notes and Acknowledgements
 
