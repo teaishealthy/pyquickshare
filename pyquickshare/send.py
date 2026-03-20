@@ -133,7 +133,7 @@ class BluetoothConnectable(Connectable):
         return reader, writer
 
 def _mime_to_type(mime_type: str) -> wire_format_pb2.FileMetadata.Type:
-    namespace = mime_type.split("/")[0]
+    namespace = mime_type.split("/", maxsplit=1)[0]
 
     if namespace == "audio":
         return wire_format_pb2.FileMetadata.AUDIO
@@ -240,7 +240,7 @@ async def _send_file(
 ) -> None:
     start_time = time.perf_counter()
     path = pathlib.Path(file)
-    total_size = path.stat().st_size
+    total_size = path.stat().st_size  # noqa: ASYNC240 - stat should be fine
     logger.debug("Sending file %r", file)
     file_name = path.name
 
