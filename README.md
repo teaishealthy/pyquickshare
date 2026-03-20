@@ -1,12 +1,12 @@
 # pyquickshare
 
-![Ruff logo](https://img.shields.io/endpoint?url=https%3A%2F%2Fteaishealthy.me%2Fv2.json&style=flat-square)
+![Ruff logo](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/teaishealthy/teaishealthy/refs/heads/main/ruff-badge.json&style=flat-square)
 ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/teaishealthy/pyquickshare/ruff.yml?style=flat-square&label=lint+and+format)
 ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/teaishealthy/pyquickshare/test.yml?style=flat-square&label=tests)
 ![Coveralls](https://img.shields.io/coverallsCoverage/github/teaishealthy/pyquickshare?style=flat-square)
 
 
-An implementation of Quick Share in Python.
+An asynchronous Python implementation of the Android Quick Share (Nearby Share) protocol
 
 ## System requirements
 
@@ -29,7 +29,10 @@ Communication with `firewalld` is done over D-Bus, `polkit` may prompt for authe
 ## Installation
 
 ```bash
-pip install git+https://github.com/teaishealthy/pyquickshare
+pip install pyquickshare
+
+# or, to install with extras (QR code support)
+pip install pyquickshare[extras]
 ```
 
 ## Features
@@ -58,10 +61,12 @@ uv run example.py send <file>
 
 ## Notes and Acknowledgements
 
-The code in [`pyquickshare/protos`](https://github.com/teaishealthy/pyquickshare/blob/main/pyquickshare/protos/) is generated from protobuf sources licensed under Apache 2.0.
+- The code in [`pyquickshare/protos`](https://github.com/teaishealthy/pyquickshare/blob/main/pyquickshare/protos/) is generated from protobuf sources licensed under Apache 2.0.
 As a derivative work, these generated files remain under the original Apache 2.0 license.
 A copy of the original license can be found in the [`pyquickshare/protos`](https://github.com/teaishealthy/pyquickshare/blob/main/pyquickshare/protos/) directory.
 
-
-This project would not have been possible without the amazing reverse engineering work done by [grishka](https://github.com/grishka/) on the Quick Share protocol.
+- This project would not have been possible without the amazing reverse engineering work done by [grishka](https://github.com/grishka/) on the Quick Share protocol.
 Check out [NearDrop](https://github.com/grishka/NearDrop/), a similar project for Mac OS.
+
+- **WiFi-Direct**: While according to Google's Nearby documentation and the protobuf fields WiFi-Direct is supposed to be an available medium, it seems that Quick Share does not use it.
+It more likely uses WiFi-Aware which isn't widely supported outside of Android devices.

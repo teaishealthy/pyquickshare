@@ -1,7 +1,7 @@
 [project]
 name = "pyquickshare"
-version = "0.1.0"
-description = ""
+version = "0.1.0.post1"
+description = "An asynchronous Python implementation of the Android Quick Share (Nearby Share) protocol"
 authors = [{ name = "teaishealthy", email = "teaishealthy@protonmail.com" }]
 requires-python = "~=3.10.0"
 readme = "README.md"
@@ -11,12 +11,55 @@ dependencies = [
     "bless>=0.2.6",
     "cryptography>=44.0.1",
     "dbus-next>=0.2.3",
-    "protobuf>=5.29.3",
+    "protobuf>=6.32.0",
     "python-magic>=0.4.27",
     "zeroconf>=0.145.1",
     # need to pin bleak (dependency of bless)
     "bleak==0.22.3",
 ]
+
+keywords = [
+    "quick share",
+    "quickshare",
+    "nearby share",
+    "nearbyshare",
+    "file transfer",
+    "file sharing",
+    "asyncio",
+    "linux",
+    "android",
+]
+
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Android",
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "Topic :: Communications :: File Sharing",
+
+    # Things we integrate with
+    "Topic :: System :: Networking",
+    "Topic :: System :: Networking :: Firewalls",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Internet :: Name Service (DNS)",
+
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+    "Framework :: AsyncIO",
+]
+
+[project.urls]
+Repository = "https://github.com/teaishealthy/pyquickshare"
+Issues = "https://github.com/teaishealthy/pyquickshare/issues"
+
+[project.optional-dependencies]
+extras = ["qrcode>=8.2"]
 
 [dependency-groups]
 dev = [
