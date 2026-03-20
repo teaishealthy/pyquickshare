@@ -1,3 +1,4 @@
+"""Bluetooth Classic/RFCOMM sockets and utilities."""
 import socket as _socket
 
 from pyquickshare.rfcomm._rfcomm import (  # pyright: ignore[reportMissingModuleSource]

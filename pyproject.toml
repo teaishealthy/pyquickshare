@@ -75,7 +75,7 @@ stubPath = "stubs"
 
 [tool.ruff]
 include = ["pyquickshare/*"]
-exclude = ["pyquickshare/protos/*", "docs/*"]
+exclude = ["pyquickshare/protos/*", "docs/*", "*.cpp"]
 line-length = 100
 
 

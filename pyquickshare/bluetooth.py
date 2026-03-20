@@ -1,8 +1,9 @@
 import asyncio
 import logging
 import socket
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, cast
+from typing import Any, cast
 
 from dbus_next.aio.message_bus import MessageBus
 from dbus_next.constants import BusType
