@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import random
 import socket
 from contextlib import closing, suppress
 from logging import getLogger
+from typing import NamedTuple
 
 import dbus_next
 import ifaddr
 from zeroconf import IPVersion
 from zeroconf.asyncio import AsyncServiceInfo, AsyncZeroconf
 
-from ..common import NETWORK_BASE_PATH, InterfaceInfo, Type, to_url64
+from ..common import NETWORK_BASE_PATH, InterfaceInfo, Type, from_url64, to_url64
 from ..dbus.firewalld import temporarily_open_port
 
 logger = getLogger(__name__)
@@ -65,6 +67,35 @@ def make_service_name(endpoint_id: bytes) -> bytearray:
     array.extend((0x00, 0x00))  # ¯\_(ツ)_/¯
 
     return array
+
+
+class DeviceMetadata(NamedTuple):
+    visible: bool
+    type: Type
+    name: str | None
+    records: dict[int, bytes]
+
+
+def parse_n(n: bytes) -> DeviceMetadata:
+    decoded = from_url64(n.decode("utf-8"))
+    buffer = io.BytesIO(decoded)
+    flags = buffer.read(1)[0]
+    visible = bool(flags & 0b00000001)
+    device_type = Type(flags >> 1 & 0b00000111)
+    buffer.read(16)  # skip the 16 bytes of ?
+    name = None
+    if visible:
+        buffer.read(1)  # length byte
+        name = decoded[18:].decode("utf-8")
+
+    records: dict[int, bytes] = {}
+    while buffer.tell() < buffer.getbuffer().nbytes:
+        type_ = buffer.read(1)[0]
+        length = buffer.read(1)[0]
+        value = buffer.read(length)
+        records[type_] = value
+
+    return DeviceMetadata(visible, device_type, name, records)
 
 
 def make_n(*, visible: bool, type: Type, name: bytes) -> bytearray:  # noqa: ARG001 # TODO: fix this
