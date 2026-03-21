@@ -1,18 +1,22 @@
 # the UKEY2 Key Exchange in Quick Share
 
-import asyncio
+from __future__ import annotations
+
 import binascii
 import hashlib
 import os
-import struct
 from logging import getLogger
+from typing import TYPE_CHECKING
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from .common import Keychain, read
+from .common import Keychain
 from .protos import securemessage_pb2, ukey_pb2
+
+if TYPE_CHECKING:
+    from .backend import ConnectionBackend
 
 KEYCHAIN_SALT = hashlib.sha256(b"SecureMessage").digest()
 D2D_SALT = binascii.unhexlify(
@@ -53,13 +57,13 @@ def from_twos_complement(data: bytes) -> int:
 
 async def parse_client_init(
     ukey_client_init: ukey_pb2.Ukey2ClientInit,
-    writer: asyncio.StreamWriter,
+    backend: ConnectionBackend,
 ) -> tuple[str, ukey_pb2.Ukey2ClientInit.CipherCommitment] | None:
     """Parse a CLIENT_INIT message.
 
     Args:
         ukey_client_init (ukey_pb2.Ukey2ClientInit): The CLIENT_INIT message
-        writer (asyncio.StreamWriter): The writer to send alerts to
+        backend (ConnectionBackend): The backend to send alerts to
 
     Returns:
         tuple[str, ukey_pb2.Ukey2ClientInit.CipherCommitment] | None: The next protocol and cipher commitment, or None if the message is invalid
@@ -68,14 +72,14 @@ async def parse_client_init(
         return await ukey_alert(
             alert_type=ukey_pb2.Ukey2Alert.BAD_VERSION,
             alert_message="Expected version 1",
-            writer=writer,
+            backend=backend,
         )
 
     if len(ukey_client_init.random) != EXPECTED_RANDOM_LENGTH:
         return await ukey_alert(
             alert_type=ukey_pb2.Ukey2Alert.BAD_RANDOM,
             alert_message="Expected 32 bytes of random",
-            writer=writer,
+            backend=backend,
         )
 
     cipher_commitment = ukey_client_init.cipher_commitments[0]
@@ -94,7 +98,7 @@ async def parse_client_init(
         return await ukey_alert(
             alert_type=ukey_pb2.Ukey2Alert.BAD_NEXT_PROTOCOL,
             alert_message="Unsupported protocol",
-            writer=writer,
+            backend=backend,
         )
 
     logger.debug(
@@ -109,14 +113,14 @@ async def parse_client_init(
 async def send_server_init(
     private_key: ec.EllipticCurvePrivateKey,
     cipher_commitment: ukey_pb2.Ukey2ClientInit.CipherCommitment,
-    writer: asyncio.StreamWriter,
+    backend: ConnectionBackend,
 ) -> bytes:
     """Send a SERVER_INIT message.
 
     Args:
         private_key (ec.EllipticCurvePrivateKey): The server's private key
         cipher_commitment (ukey_pb2.Ukey2ClientInit.CipherCommitment): The cipher commitment from the client
-        writer (asyncio.StreamWriter): The writer to send the message to
+        backend (ConnectionBackend): The backend to send the message to
 
     Returns:
         bytes: The serialized SERVER_INIT message (for key derivation)
@@ -141,11 +145,7 @@ async def send_server_init(
 
     data = server_message.SerializeToString()
 
-    writer.write(struct.pack(">I", len(data)))
-
-    writer.write(data)
-
-    await writer.drain()
+    await backend.send(data)
 
     logger.debug("Sent SERVER_INIT")
 
@@ -155,14 +155,14 @@ async def send_server_init(
 async def parse_client_finished(
     raw_message: bytes,
     commitment: ukey_pb2.Ukey2ClientInit.CipherCommitment,
-    writer: asyncio.StreamWriter,
+    backend: ConnectionBackend,
 ) -> ec.EllipticCurvePublicKey | None:
     """Parse a CLIENT_FINISH message.
 
     Args:
         raw_message (bytes): The raw CLIENT_FINISH message
         commitment (ukey_pb2.Ukey2ClientInit.CipherCommitment): The cipher commitment from the client
-        writer (asyncio.StreamWriter): The writer to send alerts to
+        backend (ConnectionBackend): The backend to close on failure
 
     Returns:
         ec.EllipticCurvePublicKey | None: The client's public key, or None if the message is invalid
@@ -178,14 +178,16 @@ async def parse_client_finished(
     if ukey_message.message_type != ukey_pb2.Ukey2Message.CLIENT_FINISH:
         # reference tells us to not send an alert here and just close the connection
         logger.debug("Expected CLIENT_FINISH")
-        return writer.close()
+        backend.writer.close()
+        return None
 
     hashed = hashlib.sha512(raw_message).digest()
 
     if hashed != commitment.commitment:
         # like above, we just close the connection
         logger.debug("Bad commitment")
-        return writer.close()
+        backend.writer.close()
+        return None
 
     client_finished = ukey_pb2.Ukey2ClientFinished()
     client_finished.ParseFromString(ukey_message.message_data)
@@ -353,22 +355,18 @@ def swap_keychain(keychain: Keychain) -> Keychain:
     )
 
 
-async def do_server_key_exchange(
-    reader: asyncio.StreamReader,
-    writer: asyncio.StreamWriter,
-) -> Keychain | None:
+async def do_server_key_exchange(backend: ConnectionBackend) -> Keychain | None:
     """Perform a server key exchange.
 
     Args:
-        reader (asyncio.StreamReader): The reader
-        writer (asyncio.StreamWriter): The writer
+        backend (ConnectionBackend): The protocol backend
 
     Returns:
         Keychain | None: The keychain, or None if the exchange failed
     """
     ukey_message = ukey_pb2.Ukey2Message()
 
-    m1 = await read(reader)
+    m1 = await backend.recv()
 
     ukey_message.ParseFromString(m1)
 
@@ -376,14 +374,14 @@ async def do_server_key_exchange(
         return await ukey_alert(
             alert_type=ukey_pb2.Ukey2Alert.BAD_MESSAGE_TYPE,
             alert_message="Expected CLIENT_INIT",
-            writer=writer,
+            backend=backend,
         )
 
     ukey_client_init = ukey_pb2.Ukey2ClientInit()
 
     ukey_client_init.ParseFromString(ukey_message.message_data)
 
-    maybe_result = await parse_client_init(ukey_client_init, writer)
+    maybe_result = await parse_client_init(ukey_client_init, backend)
 
     if not maybe_result:
         return None
@@ -393,12 +391,12 @@ async def do_server_key_exchange(
     # TODO: Support CURVE25519 when requsted
     private_key = ec.generate_private_key(ec.SECP256R1())
 
-    m2 = await send_server_init(private_key, cipher_commitment, writer)
+    m2 = await send_server_init(private_key, cipher_commitment, backend)
 
     peer_public_key = await parse_client_finished(
-        await read(reader),
+        await backend.recv(),
         cipher_commitment,
-        writer,
+        backend,
     )
 
     if not peer_public_key:
@@ -408,15 +406,11 @@ async def do_server_key_exchange(
     return derive_keys(m1, m2, private_key, peer_public_key)
 
 
-async def do_client_key_exchange(
-    reader: asyncio.StreamReader,
-    writer: asyncio.StreamWriter,
-) -> Keychain | None:
+async def do_client_key_exchange(backend: ConnectionBackend) -> Keychain | None:
     """Perform a client key exchange.
 
     Args:
-        reader (asyncio.StreamReader): The reader
-        writer (asyncio.StreamWriter): The writer
+        backend (ConnectionBackend): The protocol backend
 
     Returns:
         Keychain | None: The keychain, or None if the exchange failed
@@ -449,12 +443,10 @@ async def do_client_key_exchange(
     message_framing.message_data = ukey_client_init.SerializeToString()
 
     m1 = message_framing.SerializeToString()
-    writer.write(struct.pack(">I", len(m1)))
-    writer.write(m1)
-    await writer.drain()
+    await backend.send(m1)
 
     # SERVER_INIT
-    m2 = await read(reader)
+    m2 = await backend.recv()
 
     message_framing = ukey_pb2.Ukey2Message()
     message_framing.ParseFromString(m2)
@@ -467,8 +459,7 @@ async def do_client_key_exchange(
 
     peer_public_key = decode_public_key(generic_key)
 
-    writer.write(struct.pack(">I", len(serialized_ukey_client_finished_framed)))
-    writer.write(serialized_ukey_client_finished_framed)
+    await backend.send(serialized_ukey_client_finished_framed)
 
     return swap_keychain(derive_keys(m1, m2, private_key, peer_public_key))
 
@@ -477,21 +468,21 @@ async def ukey_alert(
     *,
     alert_type: ukey_pb2.Ukey2Alert.AlertType,
     alert_message: str,
-    writer: asyncio.StreamWriter,
+    backend: ConnectionBackend,
 ) -> None:
     """Send an alert message and close the connection.
 
     Args:
         alert_type (ukey_pb2.Ukey2Alert.AlertType): The alert type
         alert_message (str): The alert message
-        writer (asyncio.StreamWriter): The writer to send the alert to
+        backend (ConnectionBackend): The backend to send the alert to
     """
-    # Sends an alert over the wire, closes the connection
+    # Sends an alert over the wire without length-prefix framing, then closes
     message = make_alert(alert_type, alert_message)
 
-    writer.write(message.SerializeToString())
-    await writer.drain()
-    writer.close()
+    backend.writer.write(message.SerializeToString())
+    await backend.writer.drain()
+    backend.writer.close()
 
 
 def make_alert(

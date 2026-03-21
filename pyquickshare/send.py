@@ -7,7 +7,6 @@ import pathlib
 import random
 import socket
 import string
-import struct
 import time
 from logging import getLogger
 from typing import TYPE_CHECKING
@@ -19,89 +18,99 @@ from .bluetooth import BluetoothDevice, connect_bluetooth_device, find_receiving
 from .common import (
     Type,
     create_task,
-    decrypt,
     derive_endpoint_id_from_mac,
     from_url64,
-    generate_connection_response,
     generate_paired_key_encryption,
-    iter_payload_messages,
-    keep_alive,
-    make_send,
-    make_sequence_number,
-    payloadify,
     pick_mac_deterministically,
-    read,
-    with_semaphore,
 )
+from .connection import NearbyConnection
 from .mdns.receive import (
+    EndpointInfo,
     get_interfaces,
     make_n,
-    parse_n,
+    parse_endpoint_info,
 )
 from .mdns.send import discover_services as _discover_services
 from .protos import (
     offline_wire_formats_pb2,
-    securemessage_pb2,
     wire_format_pb2,
 )
 from .qrcode import QRCode, decrypt_qrcode_record, generate_qr
-from .ukey2 import Keychain, do_client_key_exchange
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
     from zeroconf.asyncio import AsyncServiceInfo
 
 logger = getLogger(__name__)
 
 NAME = "pyquickshare"
-CHUNK_SIZE = 512 * 1024
+CHUNK_SIZE = 64 * 1024
 
 
 class Connectable(abc.ABC):
     @abc.abstractmethod
     async def connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None: ...
 
+    @property
+    @abc.abstractmethod
+    def connectable(self) -> bool: ...
+
+    @property
+    @abc.abstractmethod
+    def endpoint_info(self) -> EndpointInfo | None: ...
+
 
 class WifiConnectable(Connectable):
     def __init__(self, *, service_info: AsyncServiceInfo, qr_code: QRCode) -> None:
         self.service_info = service_info
         self.qr_code = qr_code
+        self._connectable = True
+
+        name = self.service_info.name.split(".")[0].lstrip("_")
+        decoded = from_url64(name)
+        self.peer_endpoint_id = decoded[1:5].decode("ascii")
+
+        logger.debug("Discovered endpoint %r", self.peer_endpoint_id)
+
+        n_raw = self.service_info.properties.get(b"n")
+        if n_raw is not None:
+            self._endpoint_info: EndpointInfo | None = parse_endpoint_info(n_raw)
+
+            if self._endpoint_info.visible is False:
+                if 1 not in self._endpoint_info.records:
+                    logger.debug("Can't parse a hidden endpoint without a QR code record, aborting")
+                    self._connectable = False
+                    return
+
+                keychain = self.qr_code.keychain()
+                name_ = decrypt_qrcode_record(self._endpoint_info.records[1], keychain).decode(
+                    "utf-8"
+                )
+                self._endpoint_info = self._endpoint_info._replace(name=name_)
+
+    @property
+    def endpoint_info(self) -> EndpointInfo | None:
+        return self._endpoint_info
+
+    @property
+    def connectable(self) -> bool:
+        return self._endpoint_info is not None and self._connectable
 
     async def connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None:
-        service = self.service_info
-
-        name = service.name.split(".")[0].lstrip("_")
-
-        decoded = from_url64(name)
-        peer_endpoint_id = decoded[1:5].decode("ascii")
-
-        logger.debug("Discovered endpoint %r", peer_endpoint_id)
-
-        n_raw = service.properties.get(b"n")
-
-        if n_raw is None:
-            logger.debug("No n record found, aborting")
+        if not self.connectable:
+            logger.error("Endpoint %r is not connectable", self.peer_endpoint_id)
             return None
 
-        n = parse_n(n_raw)
+        assert self._endpoint_info is not None  # noqa: S101 - escape hatch for the type checker
 
-        if n.visible is False:
-            if 1 not in n.records:
-                logger.error(
-                    "Tried to connect to a hidden endpoint without a QR code record, aborting"
-                )
-                logger.error("Are you sure this is the right device?")
-                return None
-
-            keychain = self.qr_code.keychain()
-            name_ = decrypt_qrcode_record(n.records[1], keychain).decode("utf-8")
-            n = n._replace(name=name_)
-
-        logger.debug("Endpoint %r has name %r and type %r", peer_endpoint_id, n.name, n.type)
+        logger.debug(
+            "Endpoint %r has name %r and type %r",
+            self.peer_endpoint_id,
+            self._endpoint_info.name,
+            self._endpoint_info.type,
+        )
 
         address: str | None = None
-        for addr in service.addresses:
+        for addr in self.service_info.addresses:
             try:
                 address = socket.inet_ntoa(addr)
                 socket.gethostbyaddr(address)
@@ -113,13 +122,19 @@ class WifiConnectable(Connectable):
             logger.error("No resolvable addresses found, aborting")
             return None
 
-        logger.debug("Connecting to %s:%d", address, service.port)
+        logger.debug("Connecting to %s:%d", address, self.service_info.port)
 
-        return await asyncio.open_connection(address, service.port)
+        return await asyncio.open_connection(address, self.service_info.port)
+
 
 class BluetoothConnectable(Connectable):
     def __init__(self, device: BluetoothDevice) -> None:
         self.device = device
+        self._endpoint_info = device.endpoint_info
+
+    @property
+    def endpoint_info(self) -> EndpointInfo:
+        return self._endpoint_info
 
     async def connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None:
         logger.debug("Connecting to Bluetooth device %r", self.device)
@@ -131,6 +146,11 @@ class BluetoothConnectable(Connectable):
 
         reader, writer = await asyncio.open_connection(sock=sock)
         return reader, writer
+
+    @property
+    def connectable(self) -> bool:
+        return self.endpoint_info.visible is not False
+
 
 def _mime_to_type(mime_type: str) -> wire_format_pb2.FileMetadata.Type:
     namespace = mime_type.split("/", maxsplit=1)[0]
@@ -211,7 +231,7 @@ class _DiscoverIterator:
         assert self.queue is not None  # noqa: S101 - escape hatch for the type checker
         return await self.queue.get()
 
-    def __aenter__(self) -> _DiscoverIterator:
+    def __aiter__(self) -> _DiscoverIterator:
         return self
 
 
@@ -233,9 +253,7 @@ async def discover_services() -> _DiscoverIterator:
 async def _send_file(
     *,
     file: str,
-    writer: asyncio.StreamWriter,
-    keychain: Keychain,
-    sequence_number: Callable[[], int],
+    conn: NearbyConnection,
     id: int,
 ) -> None:
     start_time = time.perf_counter()
@@ -244,55 +262,34 @@ async def _send_file(
     logger.debug("Sending file %r", file)
     file_name = path.name
 
-    semaphore = asyncio.Semaphore(
-        int((total_size // CHUNK_SIZE) * 0.9) if total_size >= CHUNK_SIZE else 1
-    )
-
-    @with_semaphore(semaphore)
-    async def write_task(offset: int) -> None:
-        f.seek(offset)
-        # 512KB chunks
-        chunk = await f.read(CHUNK_SIZE)
-
-        if not chunk:
-            return
-
-        payload = payloadify(
-            chunk,
-            keychain,
-            flags=0,
-            total_size=total_size,
-            offset=offset,
-            id=id,
-            file_name=file_name,
-            type=offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.FILE,
-            sequence_number=sequence_number,
-        )
-        writer.write(struct.pack(">I", len(payload)))
-        writer.write(payload)
-        await writer.drain()
+    last_time = start_time
 
     async with aiofile.async_open(file, "rb") as f:
-        await asyncio.gather(*(write_task(offset) for offset in range(0, total_size, CHUNK_SIZE)))
-        await writer.drain()
+        for offset in range(0, total_size, CHUNK_SIZE):
+            f.seek(offset)
+            chunk = await f.read(CHUNK_SIZE)
+            if not chunk:
+                break
+            await conn.send_file_chunk(
+                chunk,
+                id=id,
+                offset=offset,
+                total_size=total_size,
+                file_name=file_name,
+            )
+            if time.perf_counter() - last_time > 1:
+                # log progress at most once per second, to avoid spamming the logs for large files
+                logger.debug("Sent %d/%d bytes", offset + len(chunk), total_size)
+                last_time = time.perf_counter()
 
-        payload = payloadify(
+        await conn.send_file_chunk(
             b"",
-            keychain,
-            flags=1,
-            total_size=total_size,
-            offset=f.tell(),
-            file_name=file_name,
             id=id,
-            type=offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.FILE,
-            sequence_number=sequence_number,
+            offset=total_size,
+            total_size=total_size,
+            file_name=file_name,
+            flags=1,
         )
-
-        await asyncio.get_event_loop().run_in_executor(
-            None, lambda: writer.write(struct.pack(">I", len(payload)))
-        )
-        await asyncio.get_event_loop().run_in_executor(None, lambda: writer.write(payload))
-        await writer.drain()
 
     end_time = time.perf_counter()
     megabytes_per_second = (total_size / 1024 / 1024) / (end_time - start_time)
@@ -327,7 +324,7 @@ async def send_to(device: Connectable, *, file: str) -> None:
     return await _handle_target(file, reader, writer, qrcode=qr_code)
 
 
-async def _send_connection_request(writer: asyncio.StreamWriter, endpoint_id: bytes) -> None:
+async def _send_connection_request(conn: NearbyConnection, endpoint_id: bytes) -> None:
     connection_request = offline_wire_formats_pb2.OfflineFrame()
     connection_request.version = offline_wire_formats_pb2.OfflineFrame.V1
     connection_request.v1.type = offline_wire_formats_pb2.V1Frame.CONNECTION_REQUEST
@@ -339,49 +336,47 @@ async def _send_connection_request(writer: asyncio.StreamWriter, endpoint_id: by
     connection_request.v1.connection_request.mediums.append(
         offline_wire_formats_pb2.ConnectionRequestFrame.WIFI_LAN,
     )
-    data = connection_request.SerializeToString()
-    writer.write(struct.pack(">I", len(data)))
-    writer.write(data)
-    await writer.drain()
+    connection_request.v1.connection_request.mediums.append(
+        offline_wire_formats_pb2.ConnectionRequestFrame.WIFI_DIRECT,
+    )
+
+    # TODO: populate from system (iw, NetworkManager, etc.)
+    wifi_channels = [36, 40, 44, 48, 149, 153, 157, 161]  # common 5GHz
+    meta = offline_wire_formats_pb2.MediumMetadata()
+    meta.supports_5_ghz = True
+    meta.supports_6_ghz = False
+    meta.mobile_radio = False
+    meta.ap_frequency = 5180  # placeholder
+    meta.available_channels.channels.extend(wifi_channels)
+    meta.wifi_lan_usable_channels.channels.extend(wifi_channels)
+    meta.wifi_direct_cli_usable_channels.channels.extend(wifi_channels)
+    connection_request.v1.connection_request.medium_metadata.CopyFrom(meta)
+
+    await conn.send_bytes(connection_request.SerializeToString())
 
 
 async def _do_paired_key_handshake(
-    reader: asyncio.StreamReader,
-    writer: asyncio.StreamWriter,
-    send: Callable[[bytes], Awaitable[None]],
+    conn: NearbyConnection,
     qrcode: QRCode | None,
-    keychain: Keychain,
 ) -> None:
-    connection_response = generate_connection_response()
-    data = connection_response.SerializeToString()
-    writer.write(struct.pack(">I", len(data)))
-    writer.write(data)
-    await writer.drain()
-
-    data = await read(reader)
-    peer_connection_response = offline_wire_formats_pb2.OfflineFrame()
-    peer_connection_response.ParseFromString(data)
-
+    """Exchange PAIRED_KEY_ENCRYPTION and PAIRED_KEY_RESULT (application layer)."""
     qr_code_handshake_data = None
     if qrcode:
-        qr_code_handshake_data = qrcode.qr_code_handshake_data(keychain.auth_string)
+        qr_code_handshake_data = qrcode.qr_code_handshake_data(conn.auth_string)
     paired_key_encryption = generate_paired_key_encryption(qr_code_handshake_data)
-    await send(paired_key_encryption.SerializeToString())
+    await conn.send_frame(paired_key_encryption)
 
-    data = await read(reader)
-    secure_message = securemessage_pb2.SecureMessage()
-    secure_message.ParseFromString(data)
-    _peer_paired_key_encryption = decrypt(secure_message, keychain)
+    await anext(conn.iter_payloads())  # consume the peer's PAIRED_KEY_RESULT
 
     paired_key_result = wire_format_pb2.Frame()
     paired_key_result.v1.type = wire_format_pb2.V1Frame.PAIRED_KEY_RESULT
     paired_key_result.version = wire_format_pb2.Frame.V1
     paired_key_result.v1.paired_key_result.status = wire_format_pb2.PairedKeyResultFrame.UNABLE
-    await send(paired_key_result.SerializeToString())
+    await conn.send_frame(paired_key_result)
 
 
 async def _send_introduction(
-    send: Callable[[bytes], Awaitable[None]],
+    conn: NearbyConnection,
     file: str,
     id: int,
 ) -> None:
@@ -390,18 +385,17 @@ async def _send_introduction(
     introduction_frame.v1.type = wire_format_pb2.V1Frame.INTRODUCTION
     introduction_frame.version = wire_format_pb2.Frame.V1
     introduction_frame.v1.introduction.file_metadata.append(meta)
-    await send(introduction_frame.SerializeToString())
+    await conn.send_frame(introduction_frame)
 
 
-async def _wait_for_accept(  # noqa: PLR0913
-    reader: asyncio.StreamReader,
-    writer: asyncio.StreamWriter,
-    keychain: Keychain,
+async def _wait_for_accept(
+    conn: NearbyConnection,
     file: str,
     id: int,
-    sequence_number: Callable[[], int],
 ) -> None:
-    async for payload_header, data in iter_payload_messages(reader, keychain):
+    send_task: asyncio.Task[None] | None = None
+
+    async for payload_header, data in conn.iter_payloads():
         wire_frame = wire_format_pb2.Frame()
         wire_frame.ParseFromString(data)
 
@@ -413,12 +407,12 @@ async def _wait_for_accept(  # noqa: PLR0913
 
             if status == wire_format_pb2.ConnectionResponseFrame.ACCEPT:
                 logger.debug("Peer accepted our introduction. Ready to send")
-                await _send_file(
-                    file=file,
-                    writer=writer,
-                    keychain=keychain,
-                    sequence_number=sequence_number,
-                    id=id,
+                send_task = create_task(
+                    _send_file(
+                        file=file,
+                        conn=conn,
+                        id=id,
+                    )
                 )
             else:
                 logger.debug("Peer rejected our introduction. Aborting")
@@ -427,6 +421,32 @@ async def _wait_for_accept(  # noqa: PLR0913
             logger.warning(
                 "Received unknown frame %d type %d", payload_header.id, wire_frame.v1.type
             )
+
+    if send_task is not None:
+        await send_task
+
+
+# should go to receive.py
+def _make_bandwidth_upgrade_frame(ip: str, port: int) -> offline_wire_formats_pb2.OfflineFrame:
+    """Offer to upgrade the connection to a higher bandwidth transport (e.g. WIFI_DIRECT)."""
+    offline_frame = offline_wire_formats_pb2.OfflineFrame()
+    offline_frame.version = offline_wire_formats_pb2.OfflineFrame.V1
+    offline_frame.v1.type = offline_wire_formats_pb2.V1Frame.BANDWIDTH_UPGRADE_NEGOTIATION
+    offline_frame.v1.bandwidth_upgrade_negotiation.event_type = (
+        offline_wire_formats_pb2.BandwidthUpgradeNegotiationFrame.UPGRADE_PATH_AVAILABLE
+    )
+    upgrade_path_info = offline_frame.v1.bandwidth_upgrade_negotiation.upgrade_path_info
+    upgrade_path_info.medium = (
+        offline_wire_formats_pb2.BandwidthUpgradeNegotiationFrame.UpgradePathInfo.WIFI_LAN
+    )
+    upgrade_path_info.supports_disabling_encryption = False
+    upgrade_path_info.supports_client_introduction_ack = False
+
+    # in network byte order
+    upgrade_path_info.wifi_lan_socket.ip_address = socket.inet_aton(ip)
+    upgrade_path_info.wifi_lan_socket.wifi_port = port
+
+    return offline_frame
 
 
 async def _handle_target(
@@ -437,27 +457,24 @@ async def _handle_target(
     qrcode: QRCode | None = None,
 ) -> None:
     endpoint_id = generate_endpoint_id()
+    conn = NearbyConnection(reader, writer, endpoint_id=endpoint_id)
     derive_endpoint_id_from_mac(pick_mac_deterministically(get_interfaces()))
 
-    await _send_connection_request(writer, endpoint_id)
+    await _send_connection_request(conn, endpoint_id)
 
-    keychain = await do_client_key_exchange(reader, writer)
-    if not keychain:
-        # the server failed the key exchange at some point
+    if not await conn.upgrade_client():
         return
 
-    # Everything on the wire is now encrypted
-    sequence_number = make_sequence_number()
-    send = make_send(writer, keychain, sequence_number)
+    await _do_paired_key_handshake(conn, qrcode)
 
-    await _do_paired_key_handshake(reader, writer, send, qrcode, keychain)
-
-    task = create_task(keep_alive(send))
+    conn.start_keep_alive()
 
     id = random.randint(0, 2**31 - 1)  # noqa: S311 - random is fine here
-    await _send_introduction(send, file, id)
-    await _wait_for_accept(reader, writer, keychain, file, id, sequence_number)
+    await _send_introduction(conn, file, id)
+    await _wait_for_accept(conn, file, id)
 
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
+    await conn.stop_keep_alive()
+    await conn.close()
+    with contextlib.suppress(Exception):
+        writer.close()
+        await writer.wait_closed()

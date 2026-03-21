@@ -4,6 +4,7 @@ import sys
 from logging import DEBUG, basicConfig
 
 import pyquickshare
+import pyquickshare.common
 
 basicConfig(level=DEBUG)
 
@@ -12,9 +13,12 @@ async def send(file: str) -> None:
     quickshare = await pyquickshare.discover_services()
     quickshare.qr_code.print()
 
-    first = await anext(quickshare)
+    async for device in quickshare:
+        if device.connectable:
+            return await pyquickshare.send_to(device, file=file)
 
-    return await pyquickshare.send_to(first, file=file)
+    return None
+
 
 
 async def main(argv: list[str]) -> None:
@@ -39,7 +43,12 @@ async def main(argv: list[str]) -> None:
     else:
         print("Unknown mode:", argv[1])
 
+async def wrapper():
+    try:
+        await main(sys.argv)
+    finally:
+        await pyquickshare.common.clear_tasks()
 
 if __name__ == "__main__":
     with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(main(sys.argv))
+        asyncio.run(wrapper())

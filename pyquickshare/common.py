@@ -2,13 +2,12 @@ import asyncio
 import atexit
 import base64
 import hashlib
-import io
 import os
 import pathlib
-import random
 import struct
 import typing
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from enum import Enum
 from logging import getLogger
 from typing import Any, NamedTuple, TypeVar
@@ -67,6 +66,12 @@ def shutdown() -> None:
         task.cancel()
 
 
+async def clear_tasks() -> None:
+    for task in tasks:
+        with suppress(asyncio.CancelledError):
+            await task
+
+
 class Type(Enum):
     unknown = 0
     phone = 1
@@ -92,20 +97,54 @@ class InterfaceInfo(NamedTuple):
     port: int
 
 
-def make_sequence_number() -> Callable[[], int]:
-    sequence_number = 0
-
-    def f() -> int:
-        nonlocal sequence_number
-        sequence_number += 1
-        return sequence_number
-
-    return f
-
-
-def payloadify(  # noqa: PLR0913 - not a lot we can do about this
-    frame: bytes,
+def encrypt_bytes(
+    data: bytes,
     keychain: Keychain,
+    sequence_number: int,
+) -> bytes:
+    device_to_device_message = device_to_device_messages_pb2.DeviceToDeviceMessage()
+    device_to_device_message.sequence_number = sequence_number
+    device_to_device_message.message = data
+
+    padder = padding.PKCS7(128).padder()
+    iv = os.urandom(16)
+    cipher = Cipher(algorithms.AES(keychain.encrypt_key), modes.CBC(iv))
+    encryptor = cipher.encryptor()
+    padded = padder.update(device_to_device_message.SerializeToString()) + padder.finalize()
+    body = encryptor.update(padded) + encryptor.finalize()
+
+    public_metadata = securegcm_pb2.GcmMetadata()
+    public_metadata.version = 1
+    public_metadata.type = securegcm_pb2.DEVICE_TO_DEVICE_MESSAGE
+
+    header_and_body = securemessage_pb2.HeaderAndBody()
+    header_and_body.header.encryption_scheme = securemessage_pb2.AES_256_CBC
+    header_and_body.header.signature_scheme = securemessage_pb2.HMAC_SHA256
+    header_and_body.header.iv = iv
+    header_and_body.header.public_metadata = public_metadata.SerializeToString()
+    header_and_body.body = body
+
+    serialized_header_and_body = header_and_body.SerializeToString()
+
+    secure_message = securemessage_pb2.SecureMessage()
+    secure_message.header_and_body = serialized_header_and_body
+    h = hmac.HMAC(keychain.send_hmac_key, hashes.SHA256())
+    h.update(serialized_header_and_body)
+    secure_message.signature = h.finalize()
+
+    return secure_message.SerializeToString()
+
+
+def encrypt_offline_frame(
+    offline_frame: offline_wire_formats_pb2.OfflineFrame,
+    keychain: Keychain,
+    sequence_number: int,
+) -> bytes:
+    return encrypt_bytes(offline_frame.SerializeToString(), keychain, sequence_number)
+
+
+def payloadify(  # noqa: PLR0913
+    frame: bytes,
     *,
     id: int,
     flags: int,
@@ -113,10 +152,7 @@ def payloadify(  # noqa: PLR0913 - not a lot we can do about this
     file_name: str | None = None,
     offset: int = 0,
     total_size: int | None = None,
-    sequence_number: Callable[[], int],
 ) -> bytes:
-    # We're working from the inside out here
-
     payload_frame = offline_wire_formats_pb2.OfflineFrame()
     payload_frame.v1.type = offline_wire_formats_pb2.V1Frame.PAYLOAD_TRANSFER
     payload_frame.version = offline_wire_formats_pb2.OfflineFrame.V1
@@ -135,56 +171,21 @@ def payloadify(  # noqa: PLR0913 - not a lot we can do about this
     payload_frame.v1.payload_transfer.payload_chunk.flags = flags
     payload_frame.v1.payload_transfer.payload_chunk.body = frame
 
-    device_to_device_message = device_to_device_messages_pb2.DeviceToDeviceMessage()
-    device_to_device_message.sequence_number = sequence_number()
-    device_to_device_message.message = payload_frame.SerializeToString()
+    return payload_frame.SerializeToString()
 
-    padder = padding.PKCS7(128).padder()
-    iv = os.urandom(16)
-    cipher = Cipher(algorithms.AES(keychain.encrypt_key), modes.CBC(iv))
-    encryptor = cipher.encryptor()
-    padded = padder.update(device_to_device_message.SerializeToString()) + padder.finalize()
 
-    body = encryptor.update(padded) + encryptor.finalize()
-
-    public_metadata = securegcm_pb2.GcmMetadata()
-    public_metadata.version = 1
-    public_metadata.type = securegcm_pb2.DEVICE_TO_DEVICE_MESSAGE
-
-    header_and_body = securemessage_pb2.HeaderAndBody()
-    header_and_body.header.encryption_scheme = securemessage_pb2.AES_256_CBC
-    header_and_body.header.signature_scheme = securemessage_pb2.HMAC_SHA256
-    header_and_body.header.iv = iv
-    header_and_body.header.public_metadata = public_metadata.SerializeToString()
-
-    header_and_body.body = body
-
-    serialized_header_and_body = header_and_body.SerializeToString()
-
+def decrypt_to_bytes(raw: bytes, keychain: Keychain) -> bytes:
     secure_message = securemessage_pb2.SecureMessage()
-    secure_message.header_and_body = serialized_header_and_body
+    secure_message.ParseFromString(raw)
 
-    h = hmac.HMAC(keychain.send_hmac_key, hashes.SHA256())
-    h.update(serialized_header_and_body)
-    secure_message.signature = h.finalize()
-
-    return secure_message.SerializeToString()
-
-
-def decrypt(
-    frame: securemessage_pb2.SecureMessage,
-    keychain: Keychain,
-) -> offline_wire_formats_pb2.OfflineFrame:
     h = hmac.HMAC(keychain.receive_hmac_key, hashes.SHA256())
-    h.update(frame.header_and_body)
-    h.verify(frame.signature)
+    h.update(secure_message.header_and_body)
+    h.verify(secure_message.signature)
 
     header_and_body = securemessage_pb2.HeaderAndBody()
-    header_and_body.ParseFromString(frame.header_and_body)
+    header_and_body.ParseFromString(secure_message.header_and_body)
 
     iv = header_and_body.header.iv
-    public_metadata = securegcm_pb2.GcmMetadata()
-    public_metadata.ParseFromString(header_and_body.header.public_metadata)
 
     padder = padding.PKCS7(128).unpadder()
     cipher = Cipher(algorithms.AES(keychain.decrypt_key), modes.CBC(iv))
@@ -195,25 +196,17 @@ def decrypt(
     device_to_device_message = device_to_device_messages_pb2.DeviceToDeviceMessage()
     device_to_device_message.ParseFromString(unpadded)
 
+    return device_to_device_message.message
+
+
+def decrypt(
+    frame: securemessage_pb2.SecureMessage,
+    keychain: Keychain,
+) -> offline_wire_formats_pb2.OfflineFrame:
+    raw_message = decrypt_to_bytes(frame.SerializeToString(), keychain)
     payload_frame = offline_wire_formats_pb2.OfflineFrame()
-    payload_frame.ParseFromString(device_to_device_message.message)
-
+    payload_frame.ParseFromString(raw_message)
     return payload_frame
-
-
-async def keep_alive(
-    send: Callable[[bytes], Awaitable[None]],
-) -> None:
-    keep_alive = offline_wire_formats_pb2.OfflineFrame()
-    keep_alive.version = offline_wire_formats_pb2.OfflineFrame.V1
-    keep_alive.v1.type = offline_wire_formats_pb2.V1Frame.KEEP_ALIVE
-    keep_alive.v1.keep_alive.ack = False
-
-    data = keep_alive.SerializeToString()
-
-    while True:
-        await send(data)
-        await asyncio.sleep(10)
 
 
 def generate_connection_response() -> offline_wire_formats_pb2.OfflineFrame:
@@ -229,43 +222,6 @@ def generate_connection_response() -> offline_wire_formats_pb2.OfflineFrame:
     )
     connection_response.v1.connection_response.multiplex_socket_bitmask = 0
     return connection_response
-
-
-def make_send(
-    writer: asyncio.StreamWriter,
-    keychain: Keychain,
-    sequence_number: Callable[[], int],
-) -> Callable[[bytes], Awaitable[None]]:
-    async def send(frame: bytes, *, id: int | None = None) -> None:
-        total_size = len(frame)
-        id = id or random.randint(0, 2**31 - 1)  # noqa: S311 - random is fine here
-        payload = payloadify(
-            frame,
-            keychain,
-            flags=0,
-            id=id,
-            total_size=total_size,
-            sequence_number=sequence_number,
-            type=offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.BYTES,
-        )
-
-        writer.write(struct.pack(">I", len(payload)))
-        writer.write(payload)
-
-        finished = payloadify(
-            b"",
-            keychain,
-            flags=1,
-            id=id,
-            total_size=total_size,
-            sequence_number=sequence_number,
-            type=offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.BYTES,
-        )
-        writer.write(struct.pack(">I", len(finished)))
-        writer.write(finished)
-        await writer.drain()
-
-    return send
 
 
 def generate_paired_key_encryption(
@@ -284,57 +240,6 @@ def generate_paired_key_encryption(
 
     paired_key_encryption.v1.paired_key_encryption.signed_data = bytes([0x00] * 72)
     return paired_key_encryption
-
-
-async def iter_payload_messages(
-    reader: asyncio.StreamReader,
-    keychain: Keychain,
-) -> AsyncIterator[tuple[offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader, bytes]]:
-    incomplete_payloads: dict[int, io.BytesIO] = {}
-    original_headers: dict[
-        int,
-        offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader,
-    ] = {}
-
-    while not reader.at_eof():
-        secure_message = securemessage_pb2.SecureMessage()
-        try:
-            secure_message.ParseFromString(await read(reader))
-        except asyncio.IncompleteReadError:
-            break
-
-        original_frame = decrypt(secure_message, keychain)
-
-        if original_frame.v1.type == offline_wire_formats_pb2.V1Frame.DISCONNECTION:
-            logger.debug("Received DISCONNECTION")
-            break
-
-        elif original_frame.v1.type != offline_wire_formats_pb2.V1Frame.PAYLOAD_TRANSFER:
-            continue
-
-        payload_header = original_frame.v1.payload_transfer.payload_header
-        payload_chunk = original_frame.v1.payload_transfer.payload_chunk
-
-        if payload_header.id not in incomplete_payloads:
-            incomplete_payloads[payload_header.id] = io.BytesIO()
-            original_headers[payload_header.id] = payload_header
-
-        buffer = incomplete_payloads[payload_header.id]
-
-        offset = payload_chunk.offset
-        buffer.seek(offset)
-        buffer.write(payload_chunk.body)
-
-        logger.debug("Received payload chunk %d", payload_header.id)
-        if payload_chunk.flags & 0b00000001:
-            incomplete_payloads.pop(payload_header.id)
-            original_header = original_headers.pop(payload_header.id)
-
-            buffer.seek(0)
-            payload = buffer.read()
-            buffer.close()
-
-            yield original_header, payload
 
 
 def derive_endpoint_id_from_mac(mac: bytes) -> bytes:

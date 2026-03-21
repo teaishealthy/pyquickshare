@@ -69,24 +69,28 @@ def make_service_name(endpoint_id: bytes) -> bytearray:
     return array
 
 
-class DeviceMetadata(NamedTuple):
+class EndpointInfo(NamedTuple):
     visible: bool
     type: Type
     name: str | None
     records: dict[int, bytes]
 
 
-def parse_n(n: bytes) -> DeviceMetadata:
+def parse_endpoint_info(n: bytes) -> EndpointInfo:
     decoded = from_url64(n.decode("utf-8"))
     buffer = io.BytesIO(decoded)
     flags = buffer.read(1)[0]
-    visible = bool(flags & 0b00000001)
+    visible = ((flags >> 4) & 1) == 0
     device_type = Type(flags >> 1 & 0b00000111)
-    buffer.read(16)  # skip the 16 bytes of ?
+
+    buffer.read(2)  # skip 2 bytes of "salt"
+    buffer.read(14)  # skip 14 bytes of "encrypted metadata key"
+
     name = None
+
     if visible:
-        buffer.read(1)  # length byte
-        name = decoded[18:].decode("utf-8")
+        name_length = buffer.read(1)[0]  # length byte
+        name = buffer.read(name_length).decode("utf-8")  # name bytes
 
     records: dict[int, bytes] = {}
     while buffer.tell() < buffer.getbuffer().nbytes:
@@ -95,7 +99,7 @@ def parse_n(n: bytes) -> DeviceMetadata:
         value = buffer.read(length)
         records[type_] = value
 
-    return DeviceMetadata(visible, device_type, name, records)
+    return EndpointInfo(visible, device_type, name, records)
 
 
 def make_n(*, visible: bool, type: Type, name: bytes) -> bytearray:  # noqa: ARG001 # TODO: fix this

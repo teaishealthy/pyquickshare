@@ -18,16 +18,11 @@ from .common import (
     Type,
     create_task,
     derive_endpoint_id_from_mac,
-    generate_connection_response,
     generate_paired_key_encryption,
-    iter_payload_messages,
-    keep_alive,
-    make_send,
-    make_sequence_number,
     pick_mac_deterministically,
-    read,
     safe_assert,
 )
+from .connection import NearbyConnection
 from .mdns.receive import (
     IPV4Runner,
     get_interface_info,
@@ -39,7 +34,6 @@ from .protos import (
     wire_format_pb2,
 )
 from .results import FileResult, Result, TextResult, WifiResult
-from .ukey2 import do_server_key_exchange
 
 NAME = "pyquickshare"
 
@@ -99,83 +93,19 @@ class ReceiveMode(enum.Enum):
     TEXT = 3
 
 
-def _generate_accept() -> bytes:
+def _generate_accept() -> wire_format_pb2.Frame:
     accept = wire_format_pb2.Frame()
     accept.v1.type = wire_format_pb2.V1Frame.RESPONSE
     accept.version = wire_format_pb2.Frame.V1
     accept.v1.connection_response.status = wire_format_pb2.ConnectionResponseFrame.ACCEPT
+    return accept
 
-    return accept.SerializeToString()
 
-
-async def _handle_client(  # noqa: C901 PLR0912 PLR0915 # TODO: refactor
+async def _receive_loop(  # noqa: C901 PLR0912 PLR0915
+    conn: NearbyConnection,
     requests: asyncio.Queue[ShareRequest],
-    reader: asyncio.StreamReader,
-    writer: asyncio.StreamWriter,
+    name: str,
 ) -> None:
-    start = time.perf_counter()
-    ip, port = writer.get_extra_info("peername")
-    logger.debug("Connection from %s:%d", ip, port)
-
-    # 4-byte big-endian length
-    data = await read(reader)
-
-    connection_request = offline_wire_formats_pb2.OfflineFrame()
-    connection_request.ParseFromString(data)
-
-    safe_assert(
-        connection_request.v1.type == offline_wire_formats_pb2.V1Frame.CONNECTION_REQUEST,
-        "Expected first message to be of type CONNECTION_REQUEST",
-    )
-
-    device_info = connection_request.v1.connection_request.endpoint_info
-
-    # like n, first byte are flags, then 16 bytes of ?, then length of name, then name
-    name = device_info[18:].decode("utf-8")
-
-    logger.debug("Received CONNECTION_REQUEST from %r", name)
-
-    keychain = await do_server_key_exchange(reader, writer)
-
-    if keychain is None:  # the client failed the key exchange at some point
-        return
-
-    # We don't actually need to include all this data, an empty frame would be fine
-
-    data = await read(reader)
-
-    client_connection_response = offline_wire_formats_pb2.OfflineFrame()
-    client_connection_response.ParseFromString(data)
-    os = offline_wire_formats_pb2.OsInfo.OsType.Name(
-        client_connection_response.v1.connection_response.os_info.type,
-    )
-    logger.debug("Client %s is on OS %r", name, os)
-
-    connection_response = generate_connection_response()
-
-    data = connection_response.SerializeToString()
-    writer.write(struct.pack(">I", len(data)))
-    writer.write(data)
-    await writer.drain()
-
-    # All messages on the wire are now encrypted
-
-    sequence_number = make_sequence_number()
-
-    send = make_send(writer, keychain, sequence_number)
-
-    logger.debug("Connection established with %r", name)
-
-    # ¯\_(ツ)_/¯
-    paired_key_encryption = generate_paired_key_encryption()
-    await send(paired_key_encryption.SerializeToString())
-
-    await writer.drain()
-
-    logger.debug("Sent PAIRED_KEY_ENCRYPTION")
-
-    keep_alive_task = asyncio.create_task(keep_alive(send))
-
     receive_mode: ReceiveMode | None = None
     expected_payload_ids: dict[
         int,
@@ -187,7 +117,7 @@ async def _handle_client(  # noqa: C901 PLR0912 PLR0915 # TODO: refactor
     request: ShareRequest | None = None
     results: list[Result] = []
 
-    async for payload_header, data in iter_payload_messages(reader, keychain):
+    async for payload_header, data in conn.iter_payloads():
         if payload_header.id in expected_payload_ids:
             metadata = expected_payload_ids.pop(payload_header.id)
 
@@ -241,14 +171,14 @@ async def _handle_client(  # noqa: C901 PLR0912 PLR0915 # TODO: refactor
 
             if wire_frame.v1.type == wire_format_pb2.V1Frame.PAIRED_KEY_RESULT:
                 # we know we failed this, and we just mirror the response
-                await send(wire_frame.SerializeToString())
+                await conn.send_frame(wire_frame)
             elif wire_frame.v1.type == wire_format_pb2.V1Frame.PAIRED_KEY_ENCRYPTION:
-                # we don't really care about this, but I just don't want to see it in the logs
+                # we don't really care about this
                 ...
             elif wire_frame.v1.type == wire_format_pb2.V1Frame.INTRODUCTION:
                 if wire_frame.v1.introduction.wifi_credentials_metadata:
                     receive_mode = ReceiveMode.WIFI
-                    request = ShareRequest(payload_header, to_pin(keychain.auth_string))
+                    request = ShareRequest(payload_header, to_pin(conn.auth_string))
                     await requests.put(request)
                     logger.debug(
                         "Receiving wifi credentials for ssids %r",
@@ -264,7 +194,7 @@ async def _handle_client(  # noqa: C901 PLR0912 PLR0915 # TODO: refactor
                         },
                     )
 
-                    await send(_generate_accept())
+                    await conn.send_frame(_generate_accept())
 
                 elif wire_frame.v1.introduction.file_metadata:
                     logger.debug(
@@ -274,13 +204,15 @@ async def _handle_client(  # noqa: C901 PLR0912 PLR0915 # TODO: refactor
                     )
 
                     receive_mode = ReceiveMode.FILES
-                    request = ShareRequest(payload_header, to_pin(keychain.auth_string))
+                    request = ShareRequest(payload_header, to_pin(conn.auth_string))
                     await requests.put(request)
                     result = await request.respond
 
                     if result:
                         logger.debug("Accepting introduction")
-                        await send(_generate_accept())
+                        accept = wire_format_pb2.Frame()
+                        accept.ParseFromString(_generate_accept().SerializeToString())
+                        await conn.send_frame(accept)
                         expected_payload_ids.update(
                             {m.payload_id: m for m in wire_frame.v1.introduction.file_metadata},
                         )
@@ -290,43 +222,77 @@ async def _handle_client(  # noqa: C901 PLR0912 PLR0915 # TODO: refactor
 
                 elif wire_frame.v1.introduction.text_metadata:
                     receive_mode = ReceiveMode.TEXT
-                    request = ShareRequest(payload_header, to_pin(keychain.auth_string))
+                    request = ShareRequest(payload_header, to_pin(conn.auth_string))
                     await requests.put(request)
                     logger.debug("Receiving text")
                     expected_payload_ids.update(
                         {m.payload_id: m for m in wire_frame.v1.introduction.text_metadata},
                     )
 
-                    await send(_generate_accept())
+                    await conn.send_frame(_generate_accept())
                 else:
                     logger.debug("Received weird introduction %d", payload_header.id)
             else:
                 logger.debug("Received unknown frame %d", payload_header.id)
 
         if not expected_payload_ids and receive_mode is not None:
-            # We've received all attachments we were expecting
             break
-
-    duration = time.perf_counter() - start
-
-    logger.debug("Connection with %r closed after %f seconds", name, duration)
 
     if request:
         request.done.set_result(results)
 
-    writer.close()
-    await writer.wait_closed()
 
-    keep_alive_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await keep_alive_task
+async def _handle_client(
+    requests: asyncio.Queue[ShareRequest],
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    *,
+    endpoint_id: bytes,
+) -> None:
+    start = time.perf_counter()
+    ip, port = writer.get_extra_info("peername")
+    logger.debug("Connection from %s:%d", ip, port)
+
+    conn = NearbyConnection(reader, writer, endpoint_id=endpoint_id)
+
+    data = await conn.recv_bytes()
+    connection_request = offline_wire_formats_pb2.OfflineFrame()
+    connection_request.ParseFromString(data)
+
+    safe_assert(
+        connection_request.v1.type == offline_wire_formats_pb2.V1Frame.CONNECTION_REQUEST,
+        "Expected first message to be of type CONNECTION_REQUEST",
+    )
+
+    device_info = connection_request.v1.connection_request.endpoint_info
+    name = device_info[18:].decode("utf-8")
+    logger.debug("Received CONNECTION_REQUEST from %r", name)
+
+    if not await conn.upgrade_server():
+        return
+
+    logger.debug("Connection established with %r", name)
+
+    conn.start_keep_alive()
+    await conn.send_frame(generate_paired_key_encryption())
+
+    await _receive_loop(conn, requests, name)
+
+    duration = time.perf_counter() - start
+    logger.debug("Connection with %r closed after %f seconds", name, duration)
+
+    await conn.stop_keep_alive()
+    await conn.close()
+    with contextlib.suppress(Exception):
+        writer.close()
+        await writer.wait_closed()
 
 
 async def _socket_server(
-    requests: asyncio.Queue[ShareRequest], *, interface_info: InterfaceInfo
+    requests: asyncio.Queue[ShareRequest], *, interface_info: InterfaceInfo, endpoint_id: bytes
 ) -> None:
     server = await asyncio.start_server(
-        lambda reader, writer: _handle_client(requests, reader, writer),
+        lambda reader, writer: _handle_client(requests, reader, writer, endpoint_id=endpoint_id),
         interface_info.ips,
         interface_info.port,
     )
@@ -355,11 +321,13 @@ async def receive(*, endpoint_id: bytes | None = None) -> AsyncIterator[ShareReq
         msg = "endpoint_id must be 4 bytes (and in ASCII)"
         raise ValueError(msg)
 
+    endpoint_id = endpoint_id or derive_endpoint_id_from_mac(
+        pick_mac_deterministically(get_interfaces())
+    )
     interface_info = await get_interface_info()
 
     info = await make_service(
-        endpoint_id=endpoint_id
-        or derive_endpoint_id_from_mac(pick_mac_deterministically(get_interfaces())),
+        endpoint_id=endpoint_id,
         visible=True,
         type_=Type.phone,
         name=NAME.encode("utf-8"),
@@ -368,7 +336,7 @@ async def receive(*, endpoint_id: bytes | None = None) -> AsyncIterator[ShareReq
     services = [info]
     result: asyncio.Queue[ShareRequest] = asyncio.Queue()
 
-    create_task(_socket_server(result, interface_info=interface_info))
+    create_task(_socket_server(result, interface_info=interface_info, endpoint_id=endpoint_id))
     create_task(_start_mdns_service(services))
 
     while True:
