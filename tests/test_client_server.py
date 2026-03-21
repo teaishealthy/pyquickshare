@@ -34,9 +34,7 @@ class PipeTransport(asyncio.WriteTransport):
 
 
 class ClientServerProtocol(asyncio.streams.FlowControlMixin, asyncio.Protocol):
-    def __init__(
-        self, close_event: asyncio.Event, loop: asyncio.AbstractEventLoop | None = None
-    ):
+    def __init__(self, close_event: asyncio.Event, loop: asyncio.AbstractEventLoop | None = None):
         self._close: asyncio.Event = close_event
         super().__init__(loop)
 
@@ -44,12 +42,10 @@ class ClientServerProtocol(asyncio.streams.FlowControlMixin, asyncio.Protocol):
         return self._close.wait()
 
 
-async def _stream_pairs() -> (
-    tuple[
-        tuple[asyncio.StreamReader, asyncio.StreamWriter],
-        tuple[asyncio.StreamReader, asyncio.StreamWriter],
-    ]
-):
+async def _stream_pairs() -> tuple[
+    tuple[asyncio.StreamReader, asyncio.StreamWriter],
+    tuple[asyncio.StreamReader, asyncio.StreamWriter],
+]:
     loop = asyncio.get_event_loop()
     server_reader = asyncio.StreamReader()
     client_reader = asyncio.StreamReader()
@@ -109,15 +105,14 @@ async def test_handle_client():
         await request.accept()
 
     with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w") as tmp:
-
         tmp.write("Hello, world!")
         tmp.flush()
 
-        task1 = asyncio.create_task(_handle_client(queue, client_reader, client_writer))
-
-        task2 = asyncio.create_task(
-            _handle_target(tmp.name, server_reader, server_writer)
+        task1 = asyncio.create_task(
+            _handle_client(queue, client_reader, client_writer, endpoint_id=b"ABCD")
         )
+
+        task2 = asyncio.create_task(_handle_target(tmp.name, server_reader, server_writer))
 
         task3 = asyncio.create_task(_helper())
 

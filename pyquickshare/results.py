@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias
 
 if TYPE_CHECKING:
-    from .protos.wire_format_pb2 import WifiCredentialsMetadata
+    from .protos.nearby.sharing.service.proto import WifiCredentialsMetadataSecurityType
 
 
 class FileResult(NamedTuple):
@@ -20,7 +20,7 @@ class TextResult(NamedTuple):
 class WifiResult(NamedTuple):
     ssid: str
     password: str
-    security_type: WifiCredentialsMetadata.SecurityType
+    security_type: WifiCredentialsMetadataSecurityType
 
 
 Result: TypeAlias = FileResult | TextResult | WifiResult

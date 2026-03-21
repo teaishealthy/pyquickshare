@@ -13,7 +13,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from .common import Keychain
-from .protos import securemessage_pb2, ukey_pb2
+from .protos import securegcm, securemessage
 
 if TYPE_CHECKING:
     from .backend import ConnectionBackend
@@ -56,28 +56,28 @@ def from_twos_complement(data: bytes) -> int:
 
 
 async def parse_client_init(
-    ukey_client_init: ukey_pb2.Ukey2ClientInit,
+    ukey_client_init: securegcm.Ukey2ClientInit,
     backend: ConnectionBackend,
-) -> tuple[str, ukey_pb2.Ukey2ClientInit.CipherCommitment] | None:
+) -> tuple[str, securegcm.Ukey2ClientInitCipherCommitment] | None:
     """Parse a CLIENT_INIT message.
 
     Args:
-        ukey_client_init (ukey_pb2.Ukey2ClientInit): The CLIENT_INIT message
+        ukey_client_init (securegcm.Ukey2ClientInit): The CLIENT_INIT message
         backend (ConnectionBackend): The backend to send alerts to
 
     Returns:
-        tuple[str, ukey_pb2.Ukey2ClientInit.CipherCommitment] | None: The next protocol and cipher commitment, or None if the message is invalid
+        tuple[str, securegcm.Ukey2ClientInitCipherCommitment] | None: The next protocol and cipher commitment, or None if the message is invalid
     """  # noqa: E501
     if ukey_client_init.version != 1:
         return await ukey_alert(
-            alert_type=ukey_pb2.Ukey2Alert.BAD_VERSION,
+            alert_type=securegcm.Ukey2AlertAlertType.BAD_VERSION,
             alert_message="Expected version 1",
             backend=backend,
         )
 
     if len(ukey_client_init.random) != EXPECTED_RANDOM_LENGTH:
         return await ukey_alert(
-            alert_type=ukey_pb2.Ukey2Alert.BAD_RANDOM,
+            alert_type=securegcm.Ukey2AlertAlertType.BAD_RANDOM,
             alert_message="Expected 32 bytes of random",
             backend=backend,
         )
@@ -96,7 +96,7 @@ async def parse_client_init(
             SUPPORTED_PROTOCOLS,
         )
         return await ukey_alert(
-            alert_type=ukey_pb2.Ukey2Alert.BAD_NEXT_PROTOCOL,
+            alert_type=securegcm.Ukey2AlertAlertType.BAD_NEXT_PROTOCOL,
             alert_message="Unsupported protocol",
             backend=backend,
         )
@@ -112,38 +112,37 @@ async def parse_client_init(
 
 async def send_server_init(
     private_key: ec.EllipticCurvePrivateKey,
-    cipher_commitment: ukey_pb2.Ukey2ClientInit.CipherCommitment,
+    cipher_commitment: securegcm.Ukey2ClientInitCipherCommitment,
     backend: ConnectionBackend,
 ) -> bytes:
     """Send a SERVER_INIT message.
 
     Args:
         private_key (ec.EllipticCurvePrivateKey): The server's private key
-        cipher_commitment (ukey_pb2.Ukey2ClientInit.CipherCommitment): The cipher commitment from the client
+        cipher_commitment (securegcm.Ukey2ClientInitCipherCommitment): The cipher commitment from the client
         backend (ConnectionBackend): The backend to send the message to
 
     Returns:
         bytes: The serialized SERVER_INIT message (for key derivation)
     """  # noqa: E501
-    server_init = ukey_pb2.Ukey2ServerInit()
-
-    server_init.version = 1
-    server_init.random = os.urandom(32)
-    server_init.handshake_cipher = cipher_commitment.handshake_cipher
-
     public_key = private_key.public_key()
-
     generic_key = encode_public_key(public_key)
 
-    server_init.public_key = generic_key.SerializeToString()
+    server_init = securegcm.Ukey2ServerInit(
+        version=1,
+        random=os.urandom(32),
+        handshake_cipher=cipher_commitment.handshake_cipher,
+        public_key=bytes(generic_key),
+    )
 
     logger.debug("Sending SERVER_INIT")
 
-    server_message = ukey_pb2.Ukey2Message()
-    server_message.message_type = ukey_pb2.Ukey2Message.SERVER_INIT
-    server_message.message_data = server_init.SerializeToString()
+    server_message = securegcm.Ukey2Message(
+        message_type=securegcm.Ukey2MessageType.SERVER_INIT,
+        message_data=bytes(server_init),
+    )
 
-    data = server_message.SerializeToString()
+    data = bytes(server_message)
 
     await backend.send(data)
 
@@ -154,14 +153,14 @@ async def send_server_init(
 
 async def parse_client_finished(
     raw_message: bytes,
-    commitment: ukey_pb2.Ukey2ClientInit.CipherCommitment,
+    commitment: securegcm.Ukey2ClientInitCipherCommitment,
     backend: ConnectionBackend,
 ) -> ec.EllipticCurvePublicKey | None:
     """Parse a CLIENT_FINISH message.
 
     Args:
         raw_message (bytes): The raw CLIENT_FINISH message
-        commitment (ukey_pb2.Ukey2ClientInit.CipherCommitment): The cipher commitment from the client
+        commitment (securegcm.Ukey2ClientInitCipherCommitment): The cipher commitment from the client
         backend (ConnectionBackend): The backend to close on failure
 
     Returns:
@@ -172,10 +171,9 @@ async def parse_client_finished(
 
     logger.debug("Parsing CLIENT_FINISH")
 
-    ukey_message = ukey_pb2.Ukey2Message()
-    ukey_message.ParseFromString(raw_message)
+    ukey_message = securegcm.Ukey2Message().parse(raw_message)
 
-    if ukey_message.message_type != ukey_pb2.Ukey2Message.CLIENT_FINISH:
+    if ukey_message.message_type != securegcm.Ukey2MessageType.CLIENT_FINISH:
         # reference tells us to not send an alert here and just close the connection
         logger.debug("Expected CLIENT_FINISH")
         backend.writer.close()
@@ -189,11 +187,9 @@ async def parse_client_finished(
         backend.writer.close()
         return None
 
-    client_finished = ukey_pb2.Ukey2ClientFinished()
-    client_finished.ParseFromString(ukey_message.message_data)
+    client_finished = securegcm.Ukey2ClientFinished().parse(ukey_message.message_data)
 
-    public_key = securemessage_pb2.GenericPublicKey()
-    public_key.ParseFromString(client_finished.public_key)
+    public_key = securemessage.GenericPublicKey().parse(client_finished.public_key)
 
     key = decode_public_key(public_key)
 
@@ -204,32 +200,33 @@ async def parse_client_finished(
 
 def encode_public_key(
     public_key: ec.EllipticCurvePublicKey,
-) -> securemessage_pb2.GenericPublicKey:
+) -> securemessage.GenericPublicKey:
     """Encode an EllipticCurvePublicKey as a GenericPublicKey.
 
     Args:
         public_key (ec.EllipticCurvePublicKey): The public key to encode
 
     Returns:
-        securemessage_pb2.GenericPublicKey: The encoded public key
+        securemessage.GenericPublicKey: The encoded public key
     """
     public_numbers = public_key.public_numbers()
 
-    generic_key = securemessage_pb2.GenericPublicKey()
-    generic_key.type = securemessage_pb2.EC_P256
-    generic_key.ec_p256_public_key.x = to_twos_complement(public_numbers.x)
-    generic_key.ec_p256_public_key.y = to_twos_complement(public_numbers.y)
-
-    return generic_key
+    return securemessage.GenericPublicKey(
+        type=securemessage.PublicKeyType.EC_P256,
+        ec_p256_public_key=securemessage.EcP256PublicKey(
+            x=to_twos_complement(public_numbers.x),
+            y=to_twos_complement(public_numbers.y),
+        ),
+    )
 
 
 def decode_public_key(
-    generic_key: securemessage_pb2.GenericPublicKey,
+    generic_key: securemessage.GenericPublicKey,
 ) -> ec.EllipticCurvePublicKey:
     """Decode a GenericPublicKey as an EllipticCurvePublicKey.
 
     Args:
-        generic_key (securemessage_pb2.GenericPublicKey): The public key to decode
+        generic_key (securemessage.GenericPublicKey): The public key to decode
 
     Raises:
         ValueError: If the key is not EC_P256
@@ -237,7 +234,7 @@ def decode_public_key(
     Returns:
         ec.EllipticCurvePublicKey: The decoded public key
     """
-    if generic_key.type != securemessage_pb2.EC_P256:
+    if generic_key.type != securemessage.PublicKeyType.EC_P256:
         msg = "Expected EC_P256"
         raise ValueError(msg)
 
@@ -364,22 +361,18 @@ async def do_server_key_exchange(backend: ConnectionBackend) -> Keychain | None:
     Returns:
         Keychain | None: The keychain, or None if the exchange failed
     """
-    ukey_message = ukey_pb2.Ukey2Message()
-
     m1 = await backend.recv()
 
-    ukey_message.ParseFromString(m1)
+    ukey_message = securegcm.Ukey2Message().parse(m1)
 
-    if ukey_message.message_type != ukey_pb2.Ukey2Message.CLIENT_INIT:
+    if ukey_message.message_type != securegcm.Ukey2MessageType.CLIENT_INIT:
         return await ukey_alert(
-            alert_type=ukey_pb2.Ukey2Alert.BAD_MESSAGE_TYPE,
+            alert_type=securegcm.Ukey2AlertAlertType.BAD_MESSAGE_TYPE,
             alert_message="Expected CLIENT_INIT",
             backend=backend,
         )
 
-    ukey_client_init = ukey_pb2.Ukey2ClientInit()
-
-    ukey_client_init.ParseFromString(ukey_message.message_data)
+    ukey_client_init = securegcm.Ukey2ClientInit().parse(ukey_message.message_data)
 
     maybe_result = await parse_client_init(ukey_client_init, backend)
 
@@ -418,44 +411,45 @@ async def do_client_key_exchange(backend: ConnectionBackend) -> Keychain | None:
     private_key = ec.generate_private_key(ec.SECP256R1())
     public_key = private_key.public_key()
 
-    ukey_client_finished = ukey_pb2.Ukey2ClientFinished()
-    ukey_client_finished.public_key = encode_public_key(public_key).SerializeToString()
-
-    ukey_client_finished_framing = ukey_pb2.Ukey2Message()
-    ukey_client_finished_framing.message_type = ukey_pb2.Ukey2Message.CLIENT_FINISH
-    ukey_client_finished_framing.message_data = ukey_client_finished.SerializeToString()
-
-    serialized_ukey_client_finished_framed = ukey_client_finished_framing.SerializeToString()
-
-    ukey_client_init = ukey_pb2.Ukey2ClientInit()
-    ukey_client_init.version = 1
-    ukey_client_init.random = os.urandom(32)
-    ukey_client_init.next_protocol = "AES_256_CBC-HMAC_SHA256"  # TODO: hardcoded
-    ukey_client_init.cipher_commitments.append(
-        ukey_pb2.Ukey2ClientInit.CipherCommitment(
-            handshake_cipher=ukey_pb2.P256_SHA512,
-            commitment=hashlib.sha512(serialized_ukey_client_finished_framed).digest(),
-        ),
+    ukey_client_finished = securegcm.Ukey2ClientFinished(
+        public_key=bytes(encode_public_key(public_key)),
     )
 
-    message_framing = ukey_pb2.Ukey2Message()
-    message_framing.message_type = ukey_pb2.Ukey2Message.CLIENT_INIT
-    message_framing.message_data = ukey_client_init.SerializeToString()
+    ukey_client_finished_framing = securegcm.Ukey2Message(
+        message_type=securegcm.Ukey2MessageType.CLIENT_FINISH,
+        message_data=bytes(ukey_client_finished),
+    )
 
-    m1 = message_framing.SerializeToString()
+    serialized_ukey_client_finished_framed = bytes(ukey_client_finished_framing)
+
+    ukey_client_init = securegcm.Ukey2ClientInit(
+        version=1,
+        random=os.urandom(32),
+        next_protocol="AES_256_CBC-HMAC_SHA256",  # TODO: hardcoded
+        cipher_commitments=[
+            securegcm.Ukey2ClientInitCipherCommitment(
+                handshake_cipher=securegcm.Ukey2HandshakeCipher.P256_SHA512,
+                commitment=hashlib.sha512(serialized_ukey_client_finished_framed).digest(),
+            ),
+        ],
+    )
+
+    message_framing = securegcm.Ukey2Message(
+        message_type=securegcm.Ukey2MessageType.CLIENT_INIT,
+        message_data=bytes(ukey_client_init),
+    )
+
+    m1 = bytes(message_framing)
     await backend.send(m1)
 
     # SERVER_INIT
     m2 = await backend.recv()
 
-    message_framing = ukey_pb2.Ukey2Message()
-    message_framing.ParseFromString(m2)
+    message_framing = securegcm.Ukey2Message().parse(m2)
 
-    server_init = ukey_pb2.Ukey2ServerInit()
-    server_init.ParseFromString(message_framing.message_data)
+    server_init = securegcm.Ukey2ServerInit().parse(message_framing.message_data)
 
-    generic_key = securemessage_pb2.GenericPublicKey()
-    generic_key.ParseFromString(server_init.public_key)
+    generic_key = securemessage.GenericPublicKey().parse(server_init.public_key)
 
     peer_public_key = decode_public_key(generic_key)
 
@@ -466,45 +460,45 @@ async def do_client_key_exchange(backend: ConnectionBackend) -> Keychain | None:
 
 async def ukey_alert(
     *,
-    alert_type: ukey_pb2.Ukey2Alert.AlertType,
+    alert_type: securegcm.Ukey2AlertAlertType,
     alert_message: str,
     backend: ConnectionBackend,
 ) -> None:
     """Send an alert message and close the connection.
 
     Args:
-        alert_type (ukey_pb2.Ukey2Alert.AlertType): The alert type
+        alert_type (securegcm.Ukey2AlertAlertType): The alert type
         alert_message (str): The alert message
         backend (ConnectionBackend): The backend to send the alert to
     """
     # Sends an alert over the wire without length-prefix framing, then closes
     message = make_alert(alert_type, alert_message)
 
-    backend.writer.write(message.SerializeToString())
+    backend.writer.write(bytes(message))
     await backend.writer.drain()
     backend.writer.close()
 
 
 def make_alert(
-    alert_type: ukey_pb2.Ukey2Alert.AlertType,
+    alert_type: securegcm.Ukey2AlertAlertType,
     error_message: str,
-) -> ukey_pb2.Ukey2Message:
+) -> securegcm.Ukey2Message:
     """Construct an alert message.
 
     Args:
-        alert_type (ukey_pb2.Ukey2Alert.AlertType): The alert type
+        alert_type (securegcm.Ukey2AlertAlertType): The alert type
         error_message (str): The error message
 
     Returns:
-        ukey_pb2.Ukey2Message: The constructed alert message
+        securegcm.Ukey2Message: The constructed alert message
     """
     # Constructs an alert message
-    alert = ukey_pb2.Ukey2Alert()
-    alert.type = alert_type
-    alert.error_message = error_message
-
-    message = ukey_pb2.Ukey2Message()
-
-    message.message_type = ukey_pb2.Ukey2Message.ALERT
-
-    return message
+    return securegcm.Ukey2Message(
+        message_type=securegcm.Ukey2MessageType.ALERT,
+        message_data=bytes(
+            securegcm.Ukey2Alert(
+                type=alert_type,
+                error_message=error_message,
+            )
+        ),
+    )

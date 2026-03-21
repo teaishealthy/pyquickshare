@@ -15,13 +15,7 @@ from typing import Any, NamedTuple, TypeVar
 from cryptography.hazmat.primitives import hashes, hmac, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from .protos import (
-    device_to_device_messages_pb2,
-    offline_wire_formats_pb2,
-    securegcm_pb2,
-    securemessage_pb2,
-    wire_format_pb2,
-)
+from .protos import offline_wire_formats, securegcm, securemessage, wire_format
 
 logger = getLogger(__name__)
 
@@ -102,45 +96,52 @@ def encrypt_bytes(
     keychain: Keychain,
     sequence_number: int,
 ) -> bytes:
-    device_to_device_message = device_to_device_messages_pb2.DeviceToDeviceMessage()
-    device_to_device_message.sequence_number = sequence_number
-    device_to_device_message.message = data
+    device_to_device_message = securegcm.DeviceToDeviceMessage(
+        sequence_number=sequence_number,
+        message=data,
+    )
 
     padder = padding.PKCS7(128).padder()
     iv = os.urandom(16)
     cipher = Cipher(algorithms.AES(keychain.encrypt_key), modes.CBC(iv))
     encryptor = cipher.encryptor()
-    padded = padder.update(device_to_device_message.SerializeToString()) + padder.finalize()
+    padded = padder.update(bytes(device_to_device_message)) + padder.finalize()
     body = encryptor.update(padded) + encryptor.finalize()
 
-    public_metadata = securegcm_pb2.GcmMetadata()
-    public_metadata.version = 1
-    public_metadata.type = securegcm_pb2.DEVICE_TO_DEVICE_MESSAGE
+    public_metadata = securegcm.GcmMetadata(
+        version=1,
+        type=securegcm.Type.DEVICE_TO_DEVICE_MESSAGE,
+    )
 
-    header_and_body = securemessage_pb2.HeaderAndBody()
-    header_and_body.header.encryption_scheme = securemessage_pb2.AES_256_CBC
-    header_and_body.header.signature_scheme = securemessage_pb2.HMAC_SHA256
-    header_and_body.header.iv = iv
-    header_and_body.header.public_metadata = public_metadata.SerializeToString()
-    header_and_body.body = body
+    header_and_body = securemessage.HeaderAndBody(
+        header=securemessage.Header(
+            encryption_scheme=securemessage.EncScheme.AES_256_CBC,
+            signature_scheme=securemessage.SigScheme.HMAC_SHA256,
+            iv=iv,
+            public_metadata=bytes(public_metadata),
+        ),
+        body=body,
+    )
 
-    serialized_header_and_body = header_and_body.SerializeToString()
+    serialized_header_and_body = bytes(header_and_body)
 
-    secure_message = securemessage_pb2.SecureMessage()
-    secure_message.header_and_body = serialized_header_and_body
     h = hmac.HMAC(keychain.send_hmac_key, hashes.SHA256())
     h.update(serialized_header_and_body)
-    secure_message.signature = h.finalize()
 
-    return secure_message.SerializeToString()
+    secure_message = securemessage.SecureMessage(
+        header_and_body=serialized_header_and_body,
+        signature=h.finalize(),
+    )
+
+    return bytes(secure_message)
 
 
 def encrypt_offline_frame(
-    offline_frame: offline_wire_formats_pb2.OfflineFrame,
+    offline_frame: offline_wire_formats.OfflineFrame,
     keychain: Keychain,
     sequence_number: int,
 ) -> bytes:
-    return encrypt_bytes(offline_frame.SerializeToString(), keychain, sequence_number)
+    return encrypt_bytes(bytes(offline_frame), keychain, sequence_number)
 
 
 def payloadify(  # noqa: PLR0913
@@ -148,42 +149,47 @@ def payloadify(  # noqa: PLR0913
     *,
     id: int,
     flags: int,
-    type: offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.PayloadType,
+    type: offline_wire_formats.PayloadTransferFramePayloadHeaderPayloadType,
     file_name: str | None = None,
     offset: int = 0,
     total_size: int | None = None,
 ) -> bytes:
-    payload_frame = offline_wire_formats_pb2.OfflineFrame()
-    payload_frame.v1.type = offline_wire_formats_pb2.V1Frame.PAYLOAD_TRANSFER
-    payload_frame.version = offline_wire_formats_pb2.OfflineFrame.V1
-    payload_frame.v1.payload_transfer.payload_header.id = id
-    payload_frame.v1.payload_transfer.payload_header.type = type
+    payload_header = offline_wire_formats.PayloadTransferFramePayloadHeader(
+        id=id,
+        type=type,
+        total_size=total_size or len(frame),
+        is_sensitive=False,
+    )
     if file_name:
-        payload_frame.v1.payload_transfer.payload_header.file_name = file_name
-    payload_frame.v1.payload_transfer.payload_header.total_size = total_size or len(
-        frame,
-    )
-    payload_frame.v1.payload_transfer.payload_header.is_sensitive = False
-    payload_frame.v1.payload_transfer.packet_type = (
-        offline_wire_formats_pb2.PayloadTransferFrame.DATA
-    )
-    payload_frame.v1.payload_transfer.payload_chunk.offset = offset
-    payload_frame.v1.payload_transfer.payload_chunk.flags = flags
-    payload_frame.v1.payload_transfer.payload_chunk.body = frame
+        payload_header.file_name = file_name
 
-    return payload_frame.SerializeToString()
+    payload_frame = offline_wire_formats.OfflineFrame(
+        version=offline_wire_formats.OfflineFrameVersion.V1,
+        v1=offline_wire_formats.V1Frame(
+            type=offline_wire_formats.V1FrameFrameType.PAYLOAD_TRANSFER,
+            payload_transfer=offline_wire_formats.PayloadTransferFrame(
+                packet_type=offline_wire_formats.PayloadTransferFramePacketType.DATA,
+                payload_header=payload_header,
+                payload_chunk=offline_wire_formats.PayloadTransferFramePayloadChunk(
+                    offset=offset,
+                    flags=flags,
+                    body=frame,
+                ),
+            ),
+        ),
+    )
+
+    return bytes(payload_frame)
 
 
 def decrypt_to_bytes(raw: bytes, keychain: Keychain) -> bytes:
-    secure_message = securemessage_pb2.SecureMessage()
-    secure_message.ParseFromString(raw)
+    secure_message = securemessage.SecureMessage().parse(raw)
 
     h = hmac.HMAC(keychain.receive_hmac_key, hashes.SHA256())
     h.update(secure_message.header_and_body)
     h.verify(secure_message.signature)
 
-    header_and_body = securemessage_pb2.HeaderAndBody()
-    header_and_body.ParseFromString(secure_message.header_and_body)
+    header_and_body = securemessage.HeaderAndBody().parse(secure_message.header_and_body)
 
     iv = header_and_body.header.iv
 
@@ -193,53 +199,52 @@ def decrypt_to_bytes(raw: bytes, keychain: Keychain) -> bytes:
     padded = decryptor.update(header_and_body.body) + decryptor.finalize()
     unpadded = padder.update(padded) + padder.finalize()
 
-    device_to_device_message = device_to_device_messages_pb2.DeviceToDeviceMessage()
-    device_to_device_message.ParseFromString(unpadded)
+    device_to_device_message = securegcm.DeviceToDeviceMessage().parse(unpadded)
 
     return device_to_device_message.message
 
 
 def decrypt(
-    frame: securemessage_pb2.SecureMessage,
+    frame: securemessage.SecureMessage,
     keychain: Keychain,
-) -> offline_wire_formats_pb2.OfflineFrame:
-    raw_message = decrypt_to_bytes(frame.SerializeToString(), keychain)
-    payload_frame = offline_wire_formats_pb2.OfflineFrame()
-    payload_frame.ParseFromString(raw_message)
-    return payload_frame
+) -> offline_wire_formats.OfflineFrame:
+    raw_message = decrypt_to_bytes(bytes(frame), keychain)
+    return offline_wire_formats.OfflineFrame().parse(raw_message)
 
 
-def generate_connection_response() -> offline_wire_formats_pb2.OfflineFrame:
-    connection_response = offline_wire_formats_pb2.OfflineFrame()
-    connection_response.version = offline_wire_formats_pb2.OfflineFrame.V1
-    connection_response.v1.type = offline_wire_formats_pb2.V1Frame.CONNECTION_RESPONSE
-    connection_response.v1.connection_response.status = 0
-    connection_response.v1.connection_response.response = (
-        offline_wire_formats_pb2.ConnectionResponseFrame.ACCEPT
+def generate_connection_response() -> offline_wire_formats.OfflineFrame:
+    return offline_wire_formats.OfflineFrame(
+        version=offline_wire_formats.OfflineFrameVersion.V1,
+        v1=offline_wire_formats.V1Frame(
+            type=offline_wire_formats.V1FrameFrameType.CONNECTION_RESPONSE,
+            connection_response=offline_wire_formats.ConnectionResponseFrame(
+                response=offline_wire_formats.ConnectionResponseFrameResponseStatus.ACCEPT,
+                os_info=offline_wire_formats.OsInfo(
+                    type=offline_wire_formats.OsInfoOsType.LINUX,  # 🐧
+                ),
+                multiplex_socket_bitmask=0,
+            ),
+        ),
     )
-    connection_response.v1.connection_response.os_info.type = (
-        offline_wire_formats_pb2.OsInfo.LINUX  # 🐧
-    )
-    connection_response.v1.connection_response.multiplex_socket_bitmask = 0
-    return connection_response
 
 
 def generate_paired_key_encryption(
     qr_code_handshake_data: bytes | None = None,
-) -> wire_format_pb2.Frame:
-    paired_key_encryption = wire_format_pb2.Frame()
-    paired_key_encryption.v1.type = wire_format_pb2.V1Frame.PAIRED_KEY_ENCRYPTION
-    paired_key_encryption.version = wire_format_pb2.Frame.V1
-    paired_key_encryption.v1.paired_key_encryption.secret_id_hash = bytes(
-        [0x00] * 6,
-    )  # fmt: off
+) -> wire_format.Frame:
+    pke = wire_format.PairedKeyEncryptionFrame(
+        secret_id_hash=bytes([0x00] * 6),
+        signed_data=bytes([0x00] * 72),
+    )
     if qr_code_handshake_data:
-        paired_key_encryption.v1.paired_key_encryption.qr_code_handshake_data = (
-            qr_code_handshake_data
-        )
+        pke.qr_code_handshake_data = qr_code_handshake_data
 
-    paired_key_encryption.v1.paired_key_encryption.signed_data = bytes([0x00] * 72)
-    return paired_key_encryption
+    return wire_format.Frame(
+        version=wire_format.FrameVersion.V1,
+        v1=wire_format.V1Frame(
+            type=wire_format.V1FrameFrameType.PAIRED_KEY_ENCRYPTION,
+            paired_key_encryption=pke,
+        ),
+    )
 
 
 def derive_endpoint_id_from_mac(mac: bytes) -> bytes:

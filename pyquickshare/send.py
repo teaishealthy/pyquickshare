@@ -31,10 +31,7 @@ from .mdns.receive import (
     parse_endpoint_info,
 )
 from .mdns.send import discover_services as _discover_services
-from .protos import (
-    offline_wire_formats_pb2,
-    wire_format_pb2,
-)
+from .protos import offline_wire_formats, wire_format
 from .qrcode import QRCode, decrypt_qrcode_record, generate_qr
 
 if TYPE_CHECKING:
@@ -152,20 +149,20 @@ class BluetoothConnectable(Connectable):
         return self.endpoint_info.visible is not False
 
 
-def _mime_to_type(mime_type: str) -> wire_format_pb2.FileMetadata.Type:
+def _mime_to_type(mime_type: str) -> wire_format.FileMetadataType:
     namespace = mime_type.split("/", maxsplit=1)[0]
 
     if namespace == "audio":
-        return wire_format_pb2.FileMetadata.AUDIO
+        return wire_format.FileMetadataType.AUDIO
     if namespace == "image":
-        return wire_format_pb2.FileMetadata.IMAGE
+        return wire_format.FileMetadataType.IMAGE
     if namespace == "video":
-        return wire_format_pb2.FileMetadata.VIDEO
+        return wire_format.FileMetadataType.VIDEO
 
-    return wire_format_pb2.FileMetadata.UNKNOWN
+    return wire_format.FileMetadataType.UNKNOWN
 
 
-def _generate_file_metadata(fp: str, id: int) -> wire_format_pb2.FileMetadata:
+def _generate_file_metadata(fp: str, id: int) -> wire_format.FileMetadata:
     path = pathlib.Path(fp)
 
     mime = magic.from_file(  # pyright: ignore[reportUnknownMemberType]
@@ -175,7 +172,7 @@ def _generate_file_metadata(fp: str, id: int) -> wire_format_pb2.FileMetadata:
     size = path.stat().st_size
     name = path.name
 
-    return wire_format_pb2.FileMetadata(
+    return wire_format.FileMetadata(
         name=name,
         type=_mime_to_type(mime),
         mime_type=mime,
@@ -325,34 +322,40 @@ async def send_to(device: Connectable, *, file: str) -> None:
 
 
 async def _send_connection_request(conn: NearbyConnection, endpoint_id: bytes) -> None:
-    connection_request = offline_wire_formats_pb2.OfflineFrame()
-    connection_request.version = offline_wire_formats_pb2.OfflineFrame.V1
-    connection_request.v1.type = offline_wire_formats_pb2.V1Frame.CONNECTION_REQUEST
-    connection_request.v1.connection_request.endpoint_name = socket.gethostname()
-    connection_request.v1.connection_request.endpoint_id = endpoint_id.decode("ascii")
-    connection_request.v1.connection_request.endpoint_info = bytes(
-        make_n(visible=True, type=Type.tablet, name=NAME.encode("utf-8")),
-    )
-    connection_request.v1.connection_request.mediums.append(
-        offline_wire_formats_pb2.ConnectionRequestFrame.WIFI_LAN,
-    )
-    connection_request.v1.connection_request.mediums.append(
-        offline_wire_formats_pb2.ConnectionRequestFrame.WIFI_DIRECT,
-    )
-
     # TODO: populate from system (iw, NetworkManager, etc.)
     wifi_channels = [36, 40, 44, 48, 149, 153, 157, 161]  # common 5GHz
-    meta = offline_wire_formats_pb2.MediumMetadata()
-    meta.supports_5_ghz = True
-    meta.supports_6_ghz = False
-    meta.mobile_radio = False
-    meta.ap_frequency = 5180  # placeholder
-    meta.available_channels.channels.extend(wifi_channels)
-    meta.wifi_lan_usable_channels.channels.extend(wifi_channels)
-    meta.wifi_direct_cli_usable_channels.channels.extend(wifi_channels)
-    connection_request.v1.connection_request.medium_metadata.CopyFrom(meta)
+    meta = offline_wire_formats.MediumMetadata(
+        supports_5_ghz=True,
+        supports_6_ghz=False,
+        mobile_radio=False,
+        ap_frequency=5180,  # placeholder
+        available_channels=offline_wire_formats.AvailableChannels(channels=wifi_channels),
+        wifi_lan_usable_channels=offline_wire_formats.WifiLanUsableChannels(channels=wifi_channels),
+        wifi_direct_cli_usable_channels=offline_wire_formats.WifiDirectCliUsableChannels(
+            channels=wifi_channels
+        ),
+    )
 
-    await conn.send_bytes(connection_request.SerializeToString())
+    connection_request = offline_wire_formats.OfflineFrame(
+        version=offline_wire_formats.OfflineFrameVersion.V1,
+        v1=offline_wire_formats.V1Frame(
+            type=offline_wire_formats.V1FrameFrameType.CONNECTION_REQUEST,
+            connection_request=offline_wire_formats.ConnectionRequestFrame(
+                endpoint_name=socket.gethostname(),
+                endpoint_id=endpoint_id.decode("ascii"),
+                endpoint_info=bytes(
+                    make_n(visible=True, type=Type.tablet, name=NAME.encode("utf-8")),
+                ),
+                mediums=[
+                    offline_wire_formats.ConnectionRequestFrameMedium.WIFI_LAN,
+                    offline_wire_formats.ConnectionRequestFrameMedium.WIFI_DIRECT,
+                ],
+                medium_metadata=meta,
+            ),
+        ),
+    )
+
+    await conn.send_bytes(bytes(connection_request))
 
 
 async def _do_paired_key_handshake(
@@ -368,10 +371,15 @@ async def _do_paired_key_handshake(
 
     await anext(conn.iter_payloads())  # consume the peer's PAIRED_KEY_RESULT
 
-    paired_key_result = wire_format_pb2.Frame()
-    paired_key_result.v1.type = wire_format_pb2.V1Frame.PAIRED_KEY_RESULT
-    paired_key_result.version = wire_format_pb2.Frame.V1
-    paired_key_result.v1.paired_key_result.status = wire_format_pb2.PairedKeyResultFrame.UNABLE
+    paired_key_result = wire_format.Frame(
+        version=wire_format.FrameVersion.V1,
+        v1=wire_format.V1Frame(
+            type=wire_format.V1FrameFrameType.PAIRED_KEY_RESULT,
+            paired_key_result=wire_format.PairedKeyResultFrame(
+                status=wire_format.PairedKeyResultFrameStatus.UNABLE,
+            ),
+        ),
+    )
     await conn.send_frame(paired_key_result)
 
 
@@ -381,10 +389,15 @@ async def _send_introduction(
     id: int,
 ) -> None:
     meta = _generate_file_metadata(file, id)
-    introduction_frame = wire_format_pb2.Frame()
-    introduction_frame.v1.type = wire_format_pb2.V1Frame.INTRODUCTION
-    introduction_frame.version = wire_format_pb2.Frame.V1
-    introduction_frame.v1.introduction.file_metadata.append(meta)
+    introduction_frame = wire_format.Frame(
+        version=wire_format.FrameVersion.V1,
+        v1=wire_format.V1Frame(
+            type=wire_format.V1FrameFrameType.INTRODUCTION,
+            introduction=wire_format.IntroductionFrame(
+                file_metadata=[meta],
+            ),
+        ),
+    )
     await conn.send_frame(introduction_frame)
 
 
@@ -396,16 +409,15 @@ async def _wait_for_accept(
     send_task: asyncio.Task[None] | None = None
 
     async for payload_header, data in conn.iter_payloads():
-        wire_frame = wire_format_pb2.Frame()
-        wire_frame.ParseFromString(data)
+        wire_frame = wire_format.Frame().parse(data)
 
-        if wire_frame.v1.type == wire_format_pb2.V1Frame.PAIRED_KEY_RESULT:
+        if wire_frame.v1.type == wire_format.V1FrameFrameType.PAIRED_KEY_RESULT:
             # we know we failed this, and we can just ignore it
             ...
-        elif wire_frame.v1.type == wire_format_pb2.V1Frame.RESPONSE:
+        elif wire_frame.v1.type == wire_format.V1FrameFrameType.RESPONSE:
             status = wire_frame.v1.connection_response.status
 
-            if status == wire_format_pb2.ConnectionResponseFrame.ACCEPT:
+            if status == wire_format.ConnectionResponseFrameStatus.ACCEPT:
                 logger.debug("Peer accepted our introduction. Ready to send")
                 send_task = create_task(
                     _send_file(
@@ -420,33 +432,34 @@ async def _wait_for_accept(
         else:
             logger.warning(
                 "Received unknown frame %d type %d", payload_header.id, wire_frame.v1.type
-            )
+            )  # noqa: RUF100
 
     if send_task is not None:
         await send_task
 
 
 # should go to receive.py
-def _make_bandwidth_upgrade_frame(ip: str, port: int) -> offline_wire_formats_pb2.OfflineFrame:
+def _make_bandwidth_upgrade_frame(ip: str, port: int) -> offline_wire_formats.OfflineFrame:
     """Offer to upgrade the connection to a higher bandwidth transport (e.g. WIFI_DIRECT)."""
-    offline_frame = offline_wire_formats_pb2.OfflineFrame()
-    offline_frame.version = offline_wire_formats_pb2.OfflineFrame.V1
-    offline_frame.v1.type = offline_wire_formats_pb2.V1Frame.BANDWIDTH_UPGRADE_NEGOTIATION
-    offline_frame.v1.bandwidth_upgrade_negotiation.event_type = (
-        offline_wire_formats_pb2.BandwidthUpgradeNegotiationFrame.UPGRADE_PATH_AVAILABLE
+    return offline_wire_formats.OfflineFrame(
+        version=offline_wire_formats.OfflineFrameVersion.V1,
+        v1=offline_wire_formats.V1Frame(
+            type=offline_wire_formats.V1FrameFrameType.BANDWIDTH_UPGRADE_NEGOTIATION,
+            bandwidth_upgrade_negotiation=offline_wire_formats.BandwidthUpgradeNegotiationFrame(
+                event_type=offline_wire_formats.BandwidthUpgradeNegotiationFrameEventType.UPGRADE_PATH_AVAILABLE,
+                upgrade_path_info=offline_wire_formats.BandwidthUpgradeNegotiationFrameUpgradePathInfo(
+                    medium=offline_wire_formats.BandwidthUpgradeNegotiationFrameUpgradePathInfoMedium.WIFI_LAN,
+                    supports_disabling_encryption=False,
+                    supports_client_introduction_ack=False,
+                    # in network byte order
+                    wifi_lan_socket=offline_wire_formats.BandwidthUpgradeNegotiationFrameUpgradePathInfoWifiLanSocket(
+                        ip_address=socket.inet_aton(ip),
+                        wifi_port=port,
+                    ),
+                ),
+            ),
+        ),
     )
-    upgrade_path_info = offline_frame.v1.bandwidth_upgrade_negotiation.upgrade_path_info
-    upgrade_path_info.medium = (
-        offline_wire_formats_pb2.BandwidthUpgradeNegotiationFrame.UpgradePathInfo.WIFI_LAN
-    )
-    upgrade_path_info.supports_disabling_encryption = False
-    upgrade_path_info.supports_client_introduction_ack = False
-
-    # in network byte order
-    upgrade_path_info.wifi_lan_socket.ip_address = socket.inet_aton(ip)
-    upgrade_path_info.wifi_lan_socket.wifi_port = port
-
-    return offline_frame
 
 
 async def _handle_target(

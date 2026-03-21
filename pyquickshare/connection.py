@@ -14,10 +14,7 @@ from .common import (
     payloadify,
 )
 from .dbus.p2p import connect_p2p_group
-from .protos import (
-    offline_wire_formats_pb2,
-    wire_format_pb2,
-)
+from .protos import offline_wire_formats, wire_format
 from .ukey2 import do_client_key_exchange, do_server_key_exchange
 
 if TYPE_CHECKING:
@@ -25,27 +22,27 @@ if TYPE_CHECKING:
 
 logger = getLogger(__name__)
 
-_PayloadHeader = offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader
+_PayloadHeader = offline_wire_formats.PayloadTransferFramePayloadHeader
+_UpgradeMedium = offline_wire_formats.BandwidthUpgradeNegotiationFrameUpgradePathInfoMedium
 
 
 async def _exchange_connection_response_client(backend: ConnectionBackend) -> None:
     """Send our CONNECTION_RESPONSE and consume the peer's."""
     connection_response = generate_connection_response()
-    await backend.send(connection_response.SerializeToString())
+    await backend.send(bytes(connection_response))
     await backend.recv()  # consume the peer's CONNECTION_RESPONSE
 
 
 async def _exchange_connection_response_server(backend: ConnectionBackend) -> None:
     """Read CONNECTION_RESPONSE, send ours."""
     data = await backend.recv()
-    client_response = offline_wire_formats_pb2.OfflineFrame()
-    client_response.ParseFromString(data)
-    os_name = offline_wire_formats_pb2.OsInfo.OsType.Name(
+    client_response = offline_wire_formats.OfflineFrame().parse(data)
+    os_name = offline_wire_formats.OsInfoOsType(
         client_response.v1.connection_response.os_info.type,
-    )
+    ).name
     logger.debug("Client OS: %s", os_name)
     connection_response = generate_connection_response()
-    await backend.send(connection_response.SerializeToString())
+    await backend.send(bytes(connection_response))
 
 
 class NearbyConnection:
@@ -109,9 +106,9 @@ class NearbyConnection:
 
     async def _send_transport_frame(
         self,
-        frame: offline_wire_formats_pb2.OfflineFrame,
+        frame: offline_wire_formats.OfflineFrame,
     ) -> None:
-        await self._backend.send(frame.SerializeToString())
+        await self._backend.send(bytes(frame))
 
     async def _send_payload_frame(  # noqa: PLR0913
         self,
@@ -119,7 +116,7 @@ class NearbyConnection:
         *,
         id: int,
         flags: int,
-        payload_type: offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.PayloadType,
+        payload_type: offline_wire_formats.PayloadTransferFramePayloadHeaderPayloadType,
         file_name: str | None = None,
         offset: int = 0,
         total_size: int | None = None,
@@ -136,23 +133,23 @@ class NearbyConnection:
         )
         await self._backend.send(frame_bytes)
 
-    async def send_frame(self, frame: wire_format_pb2.Frame) -> None:
-        """Serialise a wire_format_pb2.Frame and send as a BYTES payload."""
-        data = frame.SerializeToString()
+    async def send_frame(self, frame: wire_format.Frame) -> None:
+        """Serialise a wire_format.Frame and send as a BYTES payload."""
+        data = bytes(frame)
         id_ = random.randint(0, 2**31 - 1)  # noqa: S311
         total = len(data)
         await self._send_payload_frame(
             data,
             id=id_,
             flags=0,
-            payload_type=offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.BYTES,
+            payload_type=offline_wire_formats.PayloadTransferFramePayloadHeaderPayloadType.BYTES,
             total_size=total,
         )
         await self._send_payload_frame(
             b"",
             id=id_,
             flags=1,
-            payload_type=offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.BYTES,
+            payload_type=offline_wire_formats.PayloadTransferFramePayloadHeaderPayloadType.BYTES,
             total_size=total,
         )
 
@@ -176,7 +173,7 @@ class NearbyConnection:
                 chunk,
                 id=id,
                 flags=flags,
-                payload_type=offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader.FILE,
+                payload_type=offline_wire_formats.PayloadTransferFramePayloadHeaderPayloadType.FILE,
                 file_name=file_name,
                 offset=offset,
                 total_size=total_size,
@@ -186,7 +183,7 @@ class NearbyConnection:
             if self._active_sends == 0:
                 self._sends_idle.set()
 
-    async def iter_payloads(
+    async def iter_payloads(  # noqa: C901
         self,
     ) -> AsyncIterator[tuple[_PayloadHeader, bytes]]:
         """Yield complete (PayloadHeader, bytes) payloads."""
@@ -199,23 +196,22 @@ class NearbyConnection:
             except asyncio.IncompleteReadError:
                 break
 
-            frame = offline_wire_formats_pb2.OfflineFrame()
-            frame.ParseFromString(raw)
+            frame = offline_wire_formats.OfflineFrame().parse(raw)
             frame_type = frame.v1.type
 
-            if frame_type == offline_wire_formats_pb2.V1Frame.DISCONNECTION:
+            if frame_type == offline_wire_formats.V1FrameFrameType.DISCONNECTION:
                 logger.debug("Received DISCONNECTION")
                 break
 
-            if frame_type == offline_wire_formats_pb2.V1Frame.KEEP_ALIVE:
+            if frame_type == offline_wire_formats.V1FrameFrameType.KEEP_ALIVE:
                 logger.debug("Received KEEP_ALIVE")
                 continue
 
-            if frame_type == offline_wire_formats_pb2.V1Frame.BANDWIDTH_UPGRADE_NEGOTIATION:
+            if frame_type == offline_wire_formats.V1FrameFrameType.BANDWIDTH_UPGRADE_NEGOTIATION:
                 await self._handle_bandwidth_upgrade(frame.v1.bandwidth_upgrade_negotiation)
                 continue
 
-            if frame_type != offline_wire_formats_pb2.V1Frame.PAYLOAD_TRANSFER:
+            if frame_type != offline_wire_formats.V1FrameFrameType.PAYLOAD_TRANSFER:
                 logger.debug("Received unexpected frame type %d, skipping", frame_type)
                 continue
 
@@ -227,10 +223,19 @@ class NearbyConnection:
                 headers[payload_header.id] = payload_header
 
             buf = incomplete[payload_header.id]
+
+            if payload_chunk.offset is None:
+                logger.warning("Received payload chunk with no offset, treating as offset 0")
+                payload_chunk.offset = 0
+
             buf.seek(payload_chunk.offset)
             buf.write(payload_chunk.body)
 
             logger.debug("Received payload chunk %d", payload_header.id)
+
+            if payload_chunk.flags is None:
+                logger.warning("Received payload chunk with no flags, treating as incomplete")
+                continue
 
             if payload_chunk.flags & 0b00000001:
                 buf.seek(0)
@@ -253,23 +258,25 @@ class NearbyConnection:
             self._keep_alive_task = None
 
     async def _keep_alive_loop(self) -> None:
-        frame = offline_wire_formats_pb2.OfflineFrame()
-        frame.version = offline_wire_formats_pb2.OfflineFrame.V1
-        frame.v1.type = offline_wire_formats_pb2.V1Frame.KEEP_ALIVE
-        frame.v1.keep_alive.ack = False
+        frame = offline_wire_formats.OfflineFrame(
+            version=offline_wire_formats.OfflineFrameVersion.V1,
+            v1=offline_wire_formats.V1Frame(
+                type=offline_wire_formats.V1FrameFrameType.KEEP_ALIVE,
+                keep_alive=offline_wire_formats.KeepAliveFrame(ack=False),
+            ),
+        )
         while True:
             await self._send_transport_frame(frame)
             await asyncio.sleep(10)
 
     async def _resolve_upgrade_endpoint(
         self,
-        path: offline_wire_formats_pb2.BandwidthUpgradeNegotiationFrame.UpgradePathInfo,
+        path: offline_wire_formats.BandwidthUpgradeNegotiationFrameUpgradePathInfo,
     ) -> tuple[str, int] | None:
         """Return (ip, port) for the upgrade medium, or None to abort."""
-        Medium = offline_wire_formats_pb2.BandwidthUpgradeNegotiationFrame.UpgradePathInfo  # noqa: N806
         medium = path.medium
 
-        if medium == Medium.WIFI_DIRECT:
+        if medium == _UpgradeMedium.WIFI_DIRECT:
             creds = path.wifi_direct_credentials
             ip = creds.gateway
             port = creds.port
@@ -298,12 +305,12 @@ class NearbyConnection:
 
     async def _handle_bandwidth_upgrade(
         self,
-        upgrade_frame: offline_wire_formats_pb2.BandwidthUpgradeNegotiationFrame,
+        upgrade_frame: offline_wire_formats.BandwidthUpgradeNegotiationFrame,
     ) -> None:
         logger.debug("Received BANDWIDTH_UPGRADE_NEGOTIATION event %d", upgrade_frame.event_type)
 
         if upgrade_frame.event_type != (
-            offline_wire_formats_pb2.BandwidthUpgradeNegotiationFrame.UPGRADE_PATH_AVAILABLE
+            offline_wire_formats.BandwidthUpgradeNegotiationFrameEventType.UPGRADE_PATH_AVAILABLE
         ):
             return
 
@@ -327,27 +334,27 @@ class NearbyConnection:
         new_channel = UnencryptedBackend(new_reader, new_writer)
 
         # CLIENT_INTRODUCTION on new channel
-        intro = offline_wire_formats_pb2.OfflineFrame()
-        intro.version = offline_wire_formats_pb2.OfflineFrame.V1
-        intro.v1.type = offline_wire_formats_pb2.V1Frame.BANDWIDTH_UPGRADE_NEGOTIATION
-        intro.v1.bandwidth_upgrade_negotiation.event_type = (
-            offline_wire_formats_pb2.BandwidthUpgradeNegotiationFrame.CLIENT_INTRODUCTION
+        intro = offline_wire_formats.OfflineFrame(
+            version=offline_wire_formats.OfflineFrameVersion.V1,
+            v1=offline_wire_formats.V1Frame(
+                type=offline_wire_formats.V1FrameFrameType.BANDWIDTH_UPGRADE_NEGOTIATION,
+                bandwidth_upgrade_negotiation=offline_wire_formats.BandwidthUpgradeNegotiationFrame(
+                    event_type=offline_wire_formats.BandwidthUpgradeNegotiationFrameEventType.CLIENT_INTRODUCTION,
+                    client_introduction=offline_wire_formats.BandwidthUpgradeNegotiationFrameClientIntroduction(
+                        endpoint_id=self._endpoint_id.decode("ascii") if self._endpoint_id else "",
+                        supports_disabling_encryption=False,
+                    ),
+                ),
+            ),
         )
-        intro.v1.bandwidth_upgrade_negotiation.client_introduction.endpoint_id = (
-            self._endpoint_id.decode("ascii") if self._endpoint_id else ""
-        )
-        intro.v1.bandwidth_upgrade_negotiation.client_introduction.supports_disabling_encryption = (
-            False
-        )
-        await new_channel.send(intro.SerializeToString())
+        await new_channel.send(bytes(intro))
 
         if upgrade_frame.upgrade_path_info.supports_client_introduction_ack:
             try:
                 raw = await new_channel.recv()
-                ack = offline_wire_formats_pb2.OfflineFrame()
-                ack.ParseFromString(raw)
+                ack = offline_wire_formats.OfflineFrame().parse(raw)
                 if ack.v1.bandwidth_upgrade_negotiation.event_type != (
-                    offline_wire_formats_pb2.BandwidthUpgradeNegotiationFrame.CLIENT_INTRODUCTION_ACK
+                    offline_wire_formats.BandwidthUpgradeNegotiationFrameEventType.CLIENT_INTRODUCTION_ACK
                 ):
                     logger.warning(
                         "Expected CLIENT_INTRODUCTION_ACK, got event %d",
@@ -374,11 +381,14 @@ class NearbyConnection:
         # 4. keep reading until we get SAFE_TO_CLOSE_PRIOR_CHANNEL
 
         # LAST_WRITE_TO_PRIOR_CHANNEL on the old channel.
-        last_write = offline_wire_formats_pb2.OfflineFrame()
-        last_write.version = offline_wire_formats_pb2.OfflineFrame.V1
-        last_write.v1.type = offline_wire_formats_pb2.V1Frame.BANDWIDTH_UPGRADE_NEGOTIATION
-        last_write.v1.bandwidth_upgrade_negotiation.event_type = (
-            offline_wire_formats_pb2.BandwidthUpgradeNegotiationFrame.LAST_WRITE_TO_PRIOR_CHANNEL
+        last_write = offline_wire_formats.OfflineFrame(
+            version=offline_wire_formats.OfflineFrameVersion.V1,
+            v1=offline_wire_formats.V1Frame(
+                type=offline_wire_formats.V1FrameFrameType.BANDWIDTH_UPGRADE_NEGOTIATION,
+                bandwidth_upgrade_negotiation=offline_wire_formats.BandwidthUpgradeNegotiationFrame(
+                    event_type=offline_wire_formats.BandwidthUpgradeNegotiationFrameEventType.LAST_WRITE_TO_PRIOR_CHANNEL,
+                ),
+            ),
         )
         await self._send_transport_frame(last_write)
 
@@ -386,11 +396,10 @@ class NearbyConnection:
         try:
             while True:
                 raw = await self._backend.recv()
-                f = offline_wire_formats_pb2.OfflineFrame()
-                f.ParseFromString(raw)
-                if f.v1.type == offline_wire_formats_pb2.V1Frame.BANDWIDTH_UPGRADE_NEGOTIATION:
+                f = offline_wire_formats.OfflineFrame().parse(raw)
+                if f.v1.type == offline_wire_formats.V1FrameFrameType.BANDWIDTH_UPGRADE_NEGOTIATION:
                     if f.v1.bandwidth_upgrade_negotiation.event_type == (
-                        offline_wire_formats_pb2.BandwidthUpgradeNegotiationFrame.LAST_WRITE_TO_PRIOR_CHANNEL
+                        offline_wire_formats.BandwidthUpgradeNegotiationFrameEventType.LAST_WRITE_TO_PRIOR_CHANNEL
                     ):
                         break
                     logger.warning(
@@ -406,11 +415,14 @@ class NearbyConnection:
             logger.exception("Error waiting for LAST_WRITE_TO_PRIOR_CHANNEL")
 
         # SAFE_TO_CLOSE_PRIOR_CHANNEL on the old channel.
-        safe = offline_wire_formats_pb2.OfflineFrame()
-        safe.version = offline_wire_formats_pb2.OfflineFrame.V1
-        safe.v1.type = offline_wire_formats_pb2.V1Frame.BANDWIDTH_UPGRADE_NEGOTIATION
-        safe.v1.bandwidth_upgrade_negotiation.event_type = (
-            offline_wire_formats_pb2.BandwidthUpgradeNegotiationFrame.SAFE_TO_CLOSE_PRIOR_CHANNEL
+        safe = offline_wire_formats.OfflineFrame(
+            version=offline_wire_formats.OfflineFrameVersion.V1,
+            v1=offline_wire_formats.V1Frame(
+                type=offline_wire_formats.V1FrameFrameType.BANDWIDTH_UPGRADE_NEGOTIATION,
+                bandwidth_upgrade_negotiation=offline_wire_formats.BandwidthUpgradeNegotiationFrame(
+                    event_type=offline_wire_formats.BandwidthUpgradeNegotiationFrameEventType.SAFE_TO_CLOSE_PRIOR_CHANNEL,
+                ),
+            ),
         )
         await self._send_transport_frame(safe)
 
@@ -418,11 +430,10 @@ class NearbyConnection:
         try:
             while True:
                 raw = await self._backend.recv()
-                f = offline_wire_formats_pb2.OfflineFrame()
-                f.ParseFromString(raw)
-                if f.v1.type == offline_wire_formats_pb2.V1Frame.BANDWIDTH_UPGRADE_NEGOTIATION:
+                f = offline_wire_formats.OfflineFrame().parse(raw)
+                if f.v1.type == offline_wire_formats.V1FrameFrameType.BANDWIDTH_UPGRADE_NEGOTIATION:
                     if f.v1.bandwidth_upgrade_negotiation.event_type == (
-                        offline_wire_formats_pb2.BandwidthUpgradeNegotiationFrame.SAFE_TO_CLOSE_PRIOR_CHANNEL
+                        offline_wire_formats.BandwidthUpgradeNegotiationFrameEventType.SAFE_TO_CLOSE_PRIOR_CHANNEL
                     ):
                         break
                     logger.warning(
@@ -446,9 +457,12 @@ class NearbyConnection:
         self._backend = UnencryptedBackend(self._backend.reader, self._backend.writer)
 
         with contextlib.suppress(Exception):
-            frame = offline_wire_formats_pb2.OfflineFrame()
-            frame.version = offline_wire_formats_pb2.OfflineFrame.V1
-            frame.v1.type = offline_wire_formats_pb2.V1Frame.DISCONNECTION
+            frame = offline_wire_formats.OfflineFrame(
+                version=offline_wire_formats.OfflineFrameVersion.V1,
+                v1=offline_wire_formats.V1Frame(
+                    type=offline_wire_formats.V1FrameFrameType.DISCONNECTION,
+                ),
+            )
             await self._send_transport_frame(frame)
 
         await self._backend.writer.drain()
@@ -461,9 +475,12 @@ class NearbyConnection:
     async def close(self) -> None:
         """Send DISCONNECTION and close the writer."""
         with contextlib.suppress(Exception):
-            frame = offline_wire_formats_pb2.OfflineFrame()
-            frame.version = offline_wire_formats_pb2.OfflineFrame.V1
-            frame.v1.type = offline_wire_formats_pb2.V1Frame.DISCONNECTION
+            frame = offline_wire_formats.OfflineFrame(
+                version=offline_wire_formats.OfflineFrameVersion.V1,
+                v1=offline_wire_formats.V1Frame(
+                    type=offline_wire_formats.V1FrameFrameType.DISCONNECTION,
+                ),
+            )
             await self._send_transport_frame(frame)
 
         self._backend.writer.close()

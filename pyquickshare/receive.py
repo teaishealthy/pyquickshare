@@ -29,10 +29,7 @@ from .mdns.receive import (
     get_interfaces,
     make_service,
 )
-from .protos import (
-    offline_wire_formats_pb2,
-    wire_format_pb2,
-)
+from .protos import offline_wire_formats, wire_format
 from .results import FileResult, Result, TextResult, WifiResult
 
 NAME = "pyquickshare"
@@ -70,12 +67,12 @@ def to_pin(bytes_: bytes) -> str:
 class ShareRequest:
     def __init__(
         self,
-        header: offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader,
+        header: offline_wire_formats.PayloadTransferFramePayloadHeader,
         pin: str,
     ) -> None:
         self.respond: asyncio.Future[bool] = asyncio.Future()
         self.done: asyncio.Future[list[Result]] = asyncio.Future()
-        self.header: offline_wire_formats_pb2.PayloadTransferFrame.PayloadHeader = header
+        self.header: offline_wire_formats.PayloadTransferFramePayloadHeader = header
         self.pin: str = pin
 
     async def accept(self) -> list[Result]:
@@ -93,12 +90,16 @@ class ReceiveMode(enum.Enum):
     TEXT = 3
 
 
-def _generate_accept() -> wire_format_pb2.Frame:
-    accept = wire_format_pb2.Frame()
-    accept.v1.type = wire_format_pb2.V1Frame.RESPONSE
-    accept.version = wire_format_pb2.Frame.V1
-    accept.v1.connection_response.status = wire_format_pb2.ConnectionResponseFrame.ACCEPT
-    return accept
+def _generate_accept() -> wire_format.Frame:
+    return wire_format.Frame(
+        version=wire_format.FrameVersion.V1,
+        v1=wire_format.V1Frame(
+            type=wire_format.V1FrameFrameType.RESPONSE,
+            connection_response=wire_format.ConnectionResponseFrame(
+                status=wire_format.ConnectionResponseFrameStatus.ACCEPT,
+            ),
+        ),
+    )
 
 
 async def _receive_loop(  # noqa: C901 PLR0912 PLR0915
@@ -109,9 +110,7 @@ async def _receive_loop(  # noqa: C901 PLR0912 PLR0915
     receive_mode: ReceiveMode | None = None
     expected_payload_ids: dict[
         int,
-        wire_format_pb2.WifiCredentialsMetadata
-        | wire_format_pb2.FileMetadata
-        | wire_format_pb2.TextMetadata,
+        wire_format.WifiCredentialsMetadata | wire_format.FileMetadata | wire_format.TextMetadata,
     ] = {}
 
     request: ShareRequest | None = None
@@ -122,7 +121,7 @@ async def _receive_loop(  # noqa: C901 PLR0912 PLR0915
             metadata = expected_payload_ids.pop(payload_header.id)
 
             if receive_mode is ReceiveMode.FILES:
-                metadata = cast(wire_format_pb2.FileMetadata, metadata)
+                metadata = cast(wire_format.FileMetadata, metadata)
 
                 logger.debug(
                     "Received full file, saving to downloads/%s",
@@ -139,10 +138,9 @@ async def _receive_loop(  # noqa: C901 PLR0912 PLR0915
                     ),
                 )
             elif receive_mode is ReceiveMode.WIFI:
-                metadata = cast(wire_format_pb2.WifiCredentialsMetadata, metadata)
+                metadata = cast(wire_format.WifiCredentialsMetadata, metadata)
 
-                credentials = wire_format_pb2.WifiCredentials()
-                credentials.ParseFromString(data)
+                credentials = wire_format.WifiCredentials().parse(data)
 
                 logger.debug("Received wifi credentials %r", credentials.password)
 
@@ -154,7 +152,7 @@ async def _receive_loop(  # noqa: C901 PLR0912 PLR0915
                     ),
                 )
             elif receive_mode is ReceiveMode.TEXT:
-                metadata = cast(wire_format_pb2.TextMetadata, metadata)
+                metadata = cast(wire_format.TextMetadata, metadata)
 
                 logger.debug("Received text %d", payload_header.id)
 
@@ -166,16 +164,15 @@ async def _receive_loop(  # noqa: C901 PLR0912 PLR0915
                 )
 
         else:
-            wire_frame = wire_format_pb2.Frame()
-            wire_frame.ParseFromString(data)
+            wire_frame = wire_format.Frame().parse(data)
 
-            if wire_frame.v1.type == wire_format_pb2.V1Frame.PAIRED_KEY_RESULT:
+            if wire_frame.v1.type == wire_format.V1FrameFrameType.PAIRED_KEY_RESULT:
                 # we know we failed this, and we just mirror the response
                 await conn.send_frame(wire_frame)
-            elif wire_frame.v1.type == wire_format_pb2.V1Frame.PAIRED_KEY_ENCRYPTION:
+            elif wire_frame.v1.type == wire_format.V1FrameFrameType.PAIRED_KEY_ENCRYPTION:
                 # we don't really care about this
                 ...
-            elif wire_frame.v1.type == wire_format_pb2.V1Frame.INTRODUCTION:
+            elif wire_frame.v1.type == wire_format.V1FrameFrameType.INTRODUCTION:
                 if wire_frame.v1.introduction.wifi_credentials_metadata:
                     receive_mode = ReceiveMode.WIFI
                     request = ShareRequest(payload_header, to_pin(conn.auth_string))
@@ -210,9 +207,7 @@ async def _receive_loop(  # noqa: C901 PLR0912 PLR0915
 
                     if result:
                         logger.debug("Accepting introduction")
-                        accept = wire_format_pb2.Frame()
-                        accept.ParseFromString(_generate_accept().SerializeToString())
-                        await conn.send_frame(accept)
+                        await conn.send_frame(_generate_accept())
                         expected_payload_ids.update(
                             {m.payload_id: m for m in wire_frame.v1.introduction.file_metadata},
                         )
@@ -256,11 +251,10 @@ async def _handle_client(
     conn = NearbyConnection(reader, writer, endpoint_id=endpoint_id)
 
     data = await conn.recv_bytes()
-    connection_request = offline_wire_formats_pb2.OfflineFrame()
-    connection_request.ParseFromString(data)
+    connection_request = offline_wire_formats.OfflineFrame().parse(data)
 
     safe_assert(
-        connection_request.v1.type == offline_wire_formats_pb2.V1Frame.CONNECTION_REQUEST,
+        connection_request.v1.type == offline_wire_formats.V1FrameFrameType.CONNECTION_REQUEST,
         "Expected first message to be of type CONNECTION_REQUEST",
     )
 
