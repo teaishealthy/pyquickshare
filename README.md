@@ -12,9 +12,11 @@ An asynchronous Python implementation of the Android Quick Share (Nearby Share) 
 
 pyquickshare has following expectations from the system:
 - some mDNS implementation (avahi, systemd-resolved, etc.)
-- Bluetooth stack using BlueZ reachable via D-Bus
+- Bluetooth stack using BlueZ reachable via D-Bus*
 
 As these are de-facto standards on Linux, pyquickshare should work on most Linux distributions.
+
+\* You need to make sure BlueZ is running in dual mode: change `ControllerMode` to `dual` in `/etc/bluetooth/main.conf` and restart the Bluetooth service (e.g. `systemctl restart bluetooth`).
 
 ### Firewalls
 
