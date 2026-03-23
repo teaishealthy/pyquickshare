@@ -10,13 +10,17 @@ An asynchronous Python implementation of the Android Quick Share (Nearby Share) 
 
 ## System requirements
 
-pyquickshare has following expectations from the system:
-- some mDNS implementation (avahi, systemd-resolved, etc.)
-- Bluetooth stack using BlueZ reachable via D-Bus*
+pyquickshare makes no assumptions about the underlying system and will gracefully degrade if features are missing.
+All services are accessed over D-Bus (with the exception of some Bluetooth operations).
+For full functionality, the following are needed:
 
-As these are de-facto standards on Linux, pyquickshare should work on most Linux distributions.
+- **Bluetooth:** BlueZ with a Bluetooth Classic adapter
+- **Nudging nearby devices:** BLE support*
+- **Wi-Fi Direct:** NetworkManager with a Wi-Fi adapter
 
-\* You need to make sure BlueZ is running in dual mode: change `ControllerMode` to `dual` in `/etc/bluetooth/main.conf` and restart the Bluetooth service (e.g. `systemctl restart bluetooth`).
+pyquickshare collets `facts` about the system to determine which features are available and which transports can be used. Check the logging output for details.
+
+*BlueZ must be running in dual mode: set `ControllerMode = dual` in `/etc/bluetooth/main.conf` and restart the Bluetooth service (`systemctl restart bluetooth`).
 
 ### Firewalls
 
@@ -54,10 +58,12 @@ pip install pyquickshare[extras]
 Receive is fully implemented, namely WiFi credentials, files, and text. Sending only supports files, but support for sending text and WiFi credentials is planned.
 
 ### Transfer
-Quick Share supports two "bare" transports: WiFi/Lan and Bluetooth Classic. Bluetooth Classic *can* transfer files, but can also be used to trigger an upgrade to a faster medium (e.g. WiFi Direct or Hotspot).
+Quick Share supports two "bare" transports: WiFi/LAN and Bluetooth Classic. Bluetooth Classic *can* transfer files, but can also be used to trigger an upgrade to a faster medium (e.g. WiFi Direct or Hotspot).
+
+pyquickshare supports both transports for discovery and transfer. It also supports upgrading to WiFi Direct (and WiFi/LAN).
 
 ### Discovery
-pyquickshare uses mDNS to discover other devices on the local network. BLE is only used to trigger advertisment at the moment.
+pyquickshare uses mDNS to discover other devices on the local network. BLE is only used to trigger advertisment at the moment ("nudging" or "Fast Init").
 
 ## Usage
 

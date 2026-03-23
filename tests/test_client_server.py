@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 import pyquickshare
+from pyquickshare.facts import Facts
 from pyquickshare.receive import _handle_client  # type: ignore
 from pyquickshare.send import _handle_target  # type: ignore
 
@@ -112,7 +113,14 @@ async def test_handle_client():
             _handle_client(queue, client_reader, client_writer, endpoint_id=b"ABCD")
         )
 
-        task2 = asyncio.create_task(_handle_target(tmp.name, server_reader, server_writer))
+        task2 = asyncio.create_task(
+            _handle_target(
+                tmp.name,
+                server_reader,
+                server_writer,
+                facts=Facts(ble=False, bluetooth=False, network_manager=False),
+            )
+        )
 
         task3 = asyncio.create_task(_helper())
 

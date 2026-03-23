@@ -8,9 +8,9 @@ from zeroconf.asyncio import (
     AsyncZeroconf,
 )
 
-from pyquickshare.dbus.bluez import trigger_devices
-
 from ..common import create_task, tasks
+from ..dbus.bluez import trigger_devices
+from ..facts import Facts
 
 logger = getLogger(__name__)
 
@@ -69,8 +69,18 @@ class AsyncRunner:
             await self.result.put(info)
 
 
-async def discover_services(timeout: float = 10) -> asyncio.Queue[AsyncServiceInfo]:  # noqa: ARG001 # TODO: actually timeout
-    create_task(trigger_devices())
+async def discover_services(
+    facts: Facts,
+) -> asyncio.Queue[AsyncServiceInfo]:  # TODO: actually timeout
+    if facts.ble:
+        create_task(trigger_devices())
+    else:
+        logger.warning(
+            "BLE not available, not advertising Quick Share service. "
+            "Try scanning the QR code instead. "
+            "If your device is running an older version of Quick Share, "
+            "it may not be able to discover this device."
+        )
 
     runner = AsyncRunner()
 

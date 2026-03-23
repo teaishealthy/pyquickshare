@@ -12,6 +12,7 @@ from logging import getLogger
 from typing import TYPE_CHECKING
 
 import aiofile
+import betterproto
 import magic
 
 from .bluetooth import BluetoothDevice, connect_bluetooth_device, find_receiving_devices
@@ -24,6 +25,7 @@ from .common import (
     pick_mac_deterministically,
 )
 from .connection import NearbyConnection
+from .facts import Facts, collect_facts
 from .mdns.receive import (
     EndpointInfo,
     get_interfaces,
@@ -44,6 +46,11 @@ CHUNK_SIZE = 64 * 1024
 
 
 class Connectable(abc.ABC):
+    facts: Facts
+
+    def __init__(self, *, facts: Facts) -> None:
+        self.facts = facts
+
     @abc.abstractmethod
     async def connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None: ...
 
@@ -57,7 +64,7 @@ class Connectable(abc.ABC):
 
 
 class WifiConnectable(Connectable):
-    def __init__(self, *, service_info: AsyncServiceInfo, qr_code: QRCode) -> None:
+    def __init__(self, *, service_info: AsyncServiceInfo, qr_code: QRCode, facts: Facts) -> None:
         self.service_info = service_info
         self.qr_code = qr_code
         self._connectable = True
@@ -83,6 +90,8 @@ class WifiConnectable(Connectable):
                     "utf-8"
                 )
                 self._endpoint_info = self._endpoint_info._replace(name=name_)
+
+        super().__init__(facts=facts)
 
     @property
     def endpoint_info(self) -> EndpointInfo | None:
@@ -125,9 +134,11 @@ class WifiConnectable(Connectable):
 
 
 class BluetoothConnectable(Connectable):
-    def __init__(self, device: BluetoothDevice) -> None:
+    def __init__(self, device: BluetoothDevice, *, facts: Facts) -> None:
         self.device = device
         self._endpoint_info = device.endpoint_info
+
+        super().__init__(facts=facts)
 
     @property
     def endpoint_info(self) -> EndpointInfo:
@@ -202,26 +213,36 @@ def generate_endpoint_id() -> bytes:
 
 
 class _DiscoverIterator:
-    def __init__(self) -> None:
+    def __init__(self, *, facts: Facts) -> None:
+        self.facts = facts
         self.qr_code = generate_qr()
         self.queue: asyncio.Queue[Connectable] | None = None
 
     async def start(self) -> None:
         self.queue = asyncio.Queue()
 
-        for task in [self._wifi(self.queue), self._bluetooth(self.queue)]:
+        if self.facts.bluetooth:
+            tasks = [self._lan(self.queue), self._bluetooth(self.queue)]
+            logger.debug("Starting discovery over MDNS and Bluetooth")
+        else:
+            tasks = [self._lan(self.queue)]
+            logger.debug("Starting discovery over MDNS only (Bluetooth not available)")
+
+        for task in tasks:
             create_task(task)
 
-    async def _wifi(self, queue: asyncio.Queue[Connectable]) -> None:
-        local_queue = await _discover_services()
+    async def _lan(self, queue: asyncio.Queue[Connectable]) -> None:
+        local_queue = await _discover_services(self.facts)
         while True:
             service_info = await local_queue.get()
-            connectable = WifiConnectable(service_info=service_info, qr_code=self.qr_code)
+            connectable = WifiConnectable(
+                service_info=service_info, qr_code=self.qr_code, facts=self.facts
+            )
             await queue.put(connectable)
 
     async def _bluetooth(self, queue: asyncio.Queue[Connectable]) -> None:
         async for device in find_receiving_devices():
-            connectable = BluetoothConnectable(device=device)
+            connectable = BluetoothConnectable(device=device, facts=self.facts)
             await queue.put(connectable)
 
     async def __anext__(self) -> Connectable:
@@ -241,7 +262,9 @@ async def discover_services() -> _DiscoverIterator:
             async for service in discover_services():
                 print(service)
     """
-    iterator = _DiscoverIterator()
+    facts = await collect_facts()
+
+    iterator = _DiscoverIterator(facts=facts)
     await iterator.start()
     await asyncio.sleep(0)
     return iterator
@@ -318,23 +341,36 @@ async def send_to(device: Connectable, *, file: str) -> None:
     if isinstance(device, WifiConnectable):
         qr_code = device.qr_code
 
-    return await _handle_target(file, reader, writer, qrcode=qr_code)
+    return await _handle_target(file, reader, writer, qrcode=qr_code, facts=device.facts)
 
 
-async def _send_connection_request(conn: NearbyConnection, endpoint_id: bytes) -> None:
+async def _send_connection_request(
+    conn: NearbyConnection, endpoint_id: bytes, *, facts: Facts
+) -> None:
     # TODO: populate from system (iw, NetworkManager, etc.)
     wifi_channels = [36, 40, 44, 48, 149, 153, 157, 161]  # common 5GHz
-    meta = offline_wire_formats.MediumMetadata(
-        supports_5_ghz=True,
-        supports_6_ghz=False,
-        mobile_radio=False,
-        ap_frequency=5180,  # placeholder
-        available_channels=offline_wire_formats.AvailableChannels(channels=wifi_channels),
-        wifi_lan_usable_channels=offline_wire_formats.WifiLanUsableChannels(channels=wifi_channels),
-        wifi_direct_cli_usable_channels=offline_wire_formats.WifiDirectCliUsableChannels(
-            channels=wifi_channels
-        ),
-    )
+
+    mediums = [
+        offline_wire_formats.ConnectionRequestFrameMedium.WIFI_LAN,
+    ]
+
+    meta = betterproto.PLACEHOLDER
+
+    if facts.network_manager:
+        meta = offline_wire_formats.MediumMetadata(
+            supports_5_ghz=True,
+            supports_6_ghz=False,
+            mobile_radio=False,
+            ap_frequency=5180,  # placeholder
+            available_channels=offline_wire_formats.AvailableChannels(channels=wifi_channels),
+            wifi_lan_usable_channels=offline_wire_formats.WifiLanUsableChannels(
+                channels=wifi_channels
+            ),
+            wifi_direct_cli_usable_channels=offline_wire_formats.WifiDirectCliUsableChannels(
+                channels=wifi_channels
+            ),
+        )
+        mediums.append(offline_wire_formats.ConnectionRequestFrameMedium.WIFI_DIRECT)
 
     connection_request = offline_wire_formats.OfflineFrame(
         version=offline_wire_formats.OfflineFrameVersion.V1,
@@ -346,10 +382,7 @@ async def _send_connection_request(conn: NearbyConnection, endpoint_id: bytes) -
                 endpoint_info=bytes(
                     make_n(visible=True, type=Type.laptop, name=NAME.encode("utf-8")),
                 ),
-                mediums=[
-                    offline_wire_formats.ConnectionRequestFrameMedium.WIFI_LAN,
-                    offline_wire_formats.ConnectionRequestFrameMedium.WIFI_DIRECT,
-                ],
+                mediums=mediums,
                 medium_metadata=meta,
             ),
         ),
@@ -364,8 +397,10 @@ async def _do_paired_key_handshake(
 ) -> None:
     """Exchange PAIRED_KEY_ENCRYPTION and PAIRED_KEY_RESULT (application layer)."""
     qr_code_handshake_data = None
+
     if qrcode:
         qr_code_handshake_data = qrcode.qr_code_handshake_data(conn.auth_string)
+
     paired_key_encryption = generate_paired_key_encryption(qr_code_handshake_data)
     await conn.send_frame(paired_key_encryption)
 
@@ -467,13 +502,14 @@ async def _handle_target(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
     *,
+    facts: Facts,
     qrcode: QRCode | None = None,
 ) -> None:
     endpoint_id = generate_endpoint_id()
     conn = NearbyConnection(reader, writer, endpoint_id=endpoint_id)
     derive_endpoint_id_from_mac(pick_mac_deterministically(get_interfaces()))
 
-    await _send_connection_request(conn, endpoint_id)
+    await _send_connection_request(conn, endpoint_id, facts=facts)
 
     if not await conn.upgrade_client():
         return
