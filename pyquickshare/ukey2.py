@@ -68,6 +68,13 @@ async def parse_client_init(
     Returns:
         tuple[str, securegcm.Ukey2ClientInitCipherCommitment] | None: The next protocol and cipher commitment, or None if the message is invalid
     """  # noqa: E501
+    logger.debug(
+        "UKEY2 server: received CLIENT_INIT (version=%d random_len=%d commitments=%d)",
+        ukey_client_init.version,
+        len(ukey_client_init.random),
+        len(ukey_client_init.cipher_commitments),
+    )
+
     if ukey_client_init.version != 1:
         return await ukey_alert(
             alert_type=securegcm.Ukey2AlertAlertType.BAD_VERSION,
@@ -82,12 +89,17 @@ async def parse_client_init(
             backend=backend,
         )
 
+    if not ukey_client_init.cipher_commitments:
+        return await ukey_alert(
+            alert_type=securegcm.Ukey2AlertAlertType.BAD_HANDSHAKE_CIPHER,
+            alert_message="Missing cipher commitments",
+            backend=backend,
+        )
+
     cipher_commitment = ukey_client_init.cipher_commitments[0]
 
     # What protocol the client want's to speak next
     next_proto = ukey_client_init.next_protocol
-
-    logger.debug("Received CLIENT_INIT")
 
     if next_proto not in SUPPORTED_PROTOCOLS:
         logger.error(
@@ -135,7 +147,11 @@ async def send_server_init(
         public_key=bytes(generic_key),
     )
 
-    logger.debug("Sending SERVER_INIT")
+    logger.debug(
+        "UKEY2 server: sending SERVER_INIT (cipher=%s random_len=%d)",
+        cipher_commitment.handshake_cipher,
+        len(server_init.random),
+    )
 
     server_message = securegcm.Ukey2Message(
         message_type=securegcm.Ukey2MessageType.SERVER_INIT,
@@ -146,7 +162,7 @@ async def send_server_init(
 
     await backend.send(data)
 
-    logger.debug("Sent SERVER_INIT")
+    logger.debug("UKEY2 server: sent SERVER_INIT")
 
     return data
 
@@ -169,13 +185,16 @@ async def parse_client_finished(
     # There are a lot of things that need to be checked here
     # that's why we accept a raw message
 
-    logger.debug("Parsing CLIENT_FINISH")
+    logger.debug("UKEY2 server: parsing CLIENT_FINISH (len=%d)", len(raw_message))
 
     ukey_message = securegcm.Ukey2Message().parse(raw_message)
 
     if ukey_message.message_type != securegcm.Ukey2MessageType.CLIENT_FINISH:
         # reference tells us to not send an alert here and just close the connection
-        logger.debug("Expected CLIENT_FINISH")
+        logger.debug(
+            "UKEY2 server: expected CLIENT_FINISH but got %s; closing connection",
+            ukey_message.message_type,
+        )
         backend.writer.close()
         return None
 
@@ -183,7 +202,7 @@ async def parse_client_finished(
 
     if hashed != commitment.commitment:
         # like above, we just close the connection
-        logger.debug("Bad commitment")
+        logger.debug("UKEY2 server: CLIENT_FINISH commitment mismatch; closing connection")
         backend.writer.close()
         return None
 
@@ -193,7 +212,7 @@ async def parse_client_finished(
 
     key = decode_public_key(public_key)
 
-    logger.debug("Accepted CLIENT_FINISH")
+    logger.debug("UKEY2 server: accepted CLIENT_FINISH")
 
     return key
 
@@ -361,11 +380,16 @@ async def do_server_key_exchange(backend: ConnectionBackend) -> Keychain | None:
     Returns:
         Keychain | None: The keychain, or None if the exchange failed
     """
+    logger.debug("UKEY2 server: waiting for CLIENT_INIT")
     m1 = await backend.recv()
 
     ukey_message = securegcm.Ukey2Message().parse(m1)
 
     if ukey_message.message_type != securegcm.Ukey2MessageType.CLIENT_INIT:
+        logger.debug(
+            "UKEY2 server: first message type mismatch (got %s)",
+            ukey_message.message_type,
+        )
         return await ukey_alert(
             alert_type=securegcm.Ukey2AlertAlertType.BAD_MESSAGE_TYPE,
             alert_message="Expected CLIENT_INIT",
@@ -377,6 +401,7 @@ async def do_server_key_exchange(backend: ConnectionBackend) -> Keychain | None:
     maybe_result = await parse_client_init(ukey_client_init, backend)
 
     if not maybe_result:
+        logger.debug("UKEY2 server: rejecting CLIENT_INIT")
         return None
 
     _next_protocol, cipher_commitment = maybe_result
@@ -386,6 +411,7 @@ async def do_server_key_exchange(backend: ConnectionBackend) -> Keychain | None:
 
     m2 = await send_server_init(private_key, cipher_commitment, backend)
 
+    logger.debug("UKEY2 server: waiting for CLIENT_FINISH")
     peer_public_key = await parse_client_finished(
         await backend.recv(),
         cipher_commitment,
@@ -394,8 +420,10 @@ async def do_server_key_exchange(backend: ConnectionBackend) -> Keychain | None:
 
     if not peer_public_key:
         # parse_client_finished() rejected the CLIENT_FINISH message
+        logger.debug("UKEY2 server: key exchange failed during CLIENT_FINISH")
         return None
 
+    logger.debug("UKEY2 server: key exchange complete")
     return derive_keys(m1, m2, private_key, peer_public_key)
 
 
@@ -408,6 +436,8 @@ async def do_client_key_exchange(backend: ConnectionBackend) -> Keychain | None:
     Returns:
         Keychain | None: The keychain, or None if the exchange failed
     """
+    logger.debug("UKEY2 client: starting key exchange")
+
     private_key = ec.generate_private_key(ec.SECP256R1())
     public_key = private_key.public_key()
 
@@ -440,12 +470,21 @@ async def do_client_key_exchange(backend: ConnectionBackend) -> Keychain | None:
     )
 
     m1 = bytes(message_framing)
+    logger.debug("UKEY2 client: sending CLIENT_INIT")
     await backend.send(m1)
 
     # SERVER_INIT
+    logger.debug("UKEY2 client: waiting for SERVER_INIT")
     m2 = await backend.recv()
 
     message_framing = securegcm.Ukey2Message().parse(m2)
+
+    if message_framing.message_type != securegcm.Ukey2MessageType.SERVER_INIT:
+        logger.error(
+            "UKEY2 client: expected SERVER_INIT but got %s",
+            message_framing.message_type,
+        )
+        return None
 
     server_init = securegcm.Ukey2ServerInit().parse(message_framing.message_data)
 
@@ -453,8 +492,10 @@ async def do_client_key_exchange(backend: ConnectionBackend) -> Keychain | None:
 
     peer_public_key = decode_public_key(generic_key)
 
+    logger.debug("UKEY2 client: sending CLIENT_FINISH")
     await backend.send(serialized_ukey_client_finished_framed)
 
+    logger.debug("UKEY2 client: key exchange complete")
     return swap_keychain(derive_keys(m1, m2, private_key, peer_public_key))
 
 
@@ -471,6 +512,8 @@ async def ukey_alert(
         alert_message (str): The alert message
         backend (ConnectionBackend): The backend to send the alert to
     """
+    logger.warning("UKEY2 alert: type=%s message=%s", alert_type, alert_message)
+
     # Sends an alert over the wire without length-prefix framing, then closes
     message = make_alert(alert_type, alert_message)
 

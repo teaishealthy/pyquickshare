@@ -344,7 +344,7 @@ async def _send_connection_request(conn: NearbyConnection, endpoint_id: bytes) -
                 endpoint_name=socket.gethostname(),
                 endpoint_id=endpoint_id.decode("ascii"),
                 endpoint_info=bytes(
-                    make_n(visible=True, type=Type.tablet, name=NAME.encode("utf-8")),
+                    make_n(visible=True, type=Type.laptop, name=NAME.encode("utf-8")),
                 ),
                 mediums=[
                     offline_wire_formats.ConnectionRequestFrameMedium.WIFI_LAN,

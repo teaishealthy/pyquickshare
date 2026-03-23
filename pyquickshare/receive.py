@@ -142,7 +142,10 @@ async def _receive_loop(  # noqa: C901 PLR0912 PLR0915
 
                 credentials = wire_format.WifiCredentials().parse(data)
 
-                logger.debug("Received wifi credentials %r", credentials.password)
+                logger.debug(
+                    "Received wifi credentials payload for ssid %r",
+                    metadata.ssid,
+                )
 
                 results.append(
                     WifiResult(
@@ -323,7 +326,7 @@ async def receive(*, endpoint_id: bytes | None = None) -> AsyncIterator[ShareReq
     info = await make_service(
         endpoint_id=endpoint_id,
         visible=True,
-        type_=Type.phone,
+        type_=Type.laptop,
         name=NAME.encode("utf-8"),
         interface_info=interface_info,
     )

@@ -5,8 +5,9 @@ from logging import DEBUG, basicConfig
 
 import pyquickshare
 import pyquickshare.common
+from pyquickshare.mdns.send import trigger_devices
 
-basicConfig(level=DEBUG)
+basicConfig(level=pyquickshare.common.SILLY)
 
 
 async def send(file: str) -> None:
@@ -39,6 +40,8 @@ async def main(argv: list[str]) -> None:
         async for request in pyquickshare.receive(endpoint_id=pyquickshare.generate_endpoint_id()):
             results = await request.accept()
             print(results)
+    elif argv[1] == "advertise":
+        pyquickshare.common.create_task(trigger_devices())
 
     else:
         print("Unknown mode:", argv[1])

@@ -2,6 +2,7 @@ import asyncio
 import atexit
 import base64
 import hashlib
+import logging
 import os
 import pathlib
 import struct
@@ -18,6 +19,9 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from .protos import offline_wire_formats, securegcm, securemessage, wire_format
 
 logger = getLogger(__name__)
+
+SILLY = logging.DEBUG - 1
+logging.addLevelName(SILLY, "SILLY")
 
 tasks: list[asyncio.Task[Any]] = []
 

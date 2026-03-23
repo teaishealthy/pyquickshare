@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from .backend import ConnectionBackend, EncryptedBackend, UnencryptedBackend
 from .common import (
+    SILLY,
     create_task,
     generate_connection_response,
     payloadify,
@@ -24,6 +25,24 @@ logger = getLogger(__name__)
 
 _PayloadHeader = offline_wire_formats.PayloadTransferFramePayloadHeader
 _UpgradeMedium = offline_wire_formats.BandwidthUpgradeNegotiationFrameUpgradePathInfoMedium
+
+
+def _frame_type_name(frame_type: int) -> str:
+    try:
+        name = offline_wire_formats.V1FrameFrameType(frame_type).name
+    except ValueError:
+        return f"UNKNOWN({frame_type})"
+    else:
+        return name if name is not None else f"UNKNOWN({frame_type})"
+
+
+def _bw_event_name(event_type: int) -> str:
+    try:
+        name = offline_wire_formats.BandwidthUpgradeNegotiationFrameEventType(event_type).name
+    except ValueError:
+        return f"UNKNOWN({event_type})"
+    else:
+        return name if name is not None else f"UNKNOWN({event_type})"
 
 
 async def _exchange_connection_response_client(backend: ConnectionBackend) -> None:
@@ -108,6 +127,8 @@ class NearbyConnection:
         self,
         frame: offline_wire_formats.OfflineFrame,
     ) -> None:
+        frame_type = frame.v1.type
+        logger.log(SILLY, "Sending transport frame type=%s", _frame_type_name(frame_type))
         await self._backend.send(bytes(frame))
 
     async def _send_payload_frame(  # noqa: PLR0913
@@ -122,6 +143,17 @@ class NearbyConnection:
         total_size: int | None = None,
     ) -> None:
         """Wrap data in PAYLOAD_TRANSFER."""
+        logger.log(
+            SILLY,
+            "PAYLOAD_TRANSFER: id=%d type=%s flags=%02x len=%d offset=%d total=%s file=%s",
+            id,
+            offline_wire_formats.PayloadTransferFramePayloadHeaderPayloadType(payload_type).name,
+            flags,
+            len(data),
+            offset,
+            total_size,
+            file_name,
+        )
         frame_bytes = payloadify(
             data,
             id=id,
@@ -198,6 +230,7 @@ class NearbyConnection:
 
             frame = offline_wire_formats.OfflineFrame().parse(raw)
             frame_type = frame.v1.type
+            logger.log(SILLY, "Received transport frame type=%s", _frame_type_name(frame_type))
 
             if frame_type == offline_wire_formats.V1FrameFrameType.DISCONNECTION:
                 logger.debug("Received DISCONNECTION")
@@ -212,7 +245,10 @@ class NearbyConnection:
                 continue
 
             if frame_type != offline_wire_formats.V1FrameFrameType.PAYLOAD_TRANSFER:
-                logger.debug("Received unexpected frame type %d, skipping", frame_type)
+                logger.debug(
+                    "Received unexpected frame type=%s, skipping",
+                    _frame_type_name(frame_type),
+                )
                 continue
 
             payload_header = frame.v1.payload_transfer.payload_header
@@ -231,7 +267,7 @@ class NearbyConnection:
             buf.seek(payload_chunk.offset)
             buf.write(payload_chunk.body)
 
-            logger.debug("Received payload chunk %d", payload_header.id)
+            logger.log(SILLY, "Received payload chunk %d", payload_header.id)
 
             if payload_chunk.flags is None:
                 logger.warning("Received payload chunk with no flags, treating as incomplete")
@@ -275,7 +311,6 @@ class NearbyConnection:
     ) -> tuple[str, int] | None:
         """Return (ip, port) for the upgrade medium, or None to abort."""
         medium = path.medium
-
         if medium == _UpgradeMedium.WIFI_DIRECT:
             creds = path.wifi_direct_credentials
             ip = creds.gateway
@@ -307,7 +342,10 @@ class NearbyConnection:
         self,
         upgrade_frame: offline_wire_formats.BandwidthUpgradeNegotiationFrame,
     ) -> None:
-        logger.debug("Received BANDWIDTH_UPGRADE_NEGOTIATION event %d", upgrade_frame.event_type)
+        logger.debug(
+            "Received BANDWIDTH_UPGRADE_NEGOTIATION event=%s",
+            _bw_event_name(upgrade_frame.event_type),
+        )
 
         if upgrade_frame.event_type != (
             offline_wire_formats.BandwidthUpgradeNegotiationFrameEventType.UPGRADE_PATH_AVAILABLE
@@ -357,8 +395,8 @@ class NearbyConnection:
                     offline_wire_formats.BandwidthUpgradeNegotiationFrameEventType.CLIENT_INTRODUCTION_ACK
                 ):
                     logger.warning(
-                        "Expected CLIENT_INTRODUCTION_ACK, got event %d",
-                        ack.v1.bandwidth_upgrade_negotiation.event_type,
+                        "Expected CLIENT_INTRODUCTION_ACK, got event=%s",
+                        _bw_event_name(ack.v1.bandwidth_upgrade_negotiation.event_type),
                     )
             except Exception:
                 logger.exception("Failed to receive CLIENT_INTRODUCTION_ACK")
@@ -403,13 +441,13 @@ class NearbyConnection:
                     ):
                         break
                     logger.warning(
-                        "Expected LAST_WRITE_TO_PRIOR_CHANNEL, got bw event %d",
-                        f.v1.bandwidth_upgrade_negotiation.event_type,
+                        "Expected LAST_WRITE_TO_PRIOR_CHANNEL, got bw event=%s",
+                        _bw_event_name(f.v1.bandwidth_upgrade_negotiation.event_type),
                     )
                 else:
                     logger.debug(
-                        "Skipping frame type %d while waiting for LAST_WRITE_TO_PRIOR_CHANNEL",
-                        f.v1.type,
+                        "Skipping frame type=%s while waiting for LAST_WRITE_TO_PRIOR_CHANNEL",
+                        _frame_type_name(f.v1.type),
                     )
         except Exception:
             logger.exception("Error waiting for LAST_WRITE_TO_PRIOR_CHANNEL")
@@ -437,13 +475,13 @@ class NearbyConnection:
                     ):
                         break
                     logger.warning(
-                        "Expected SAFE_TO_CLOSE_PRIOR_CHANNEL, got bw event %d",
-                        f.v1.bandwidth_upgrade_negotiation.event_type,
+                        "Expected SAFE_TO_CLOSE_PRIOR_CHANNEL, got bw event=%s",
+                        _bw_event_name(f.v1.bandwidth_upgrade_negotiation.event_type),
                     )
                 else:
                     logger.debug(
-                        "Skipping frame type %d while waiting for SAFE_TO_CLOSE_PRIOR_CHANNEL",
-                        f.v1.type,
+                        "Skipping frame type=%s while waiting for SAFE_TO_CLOSE_PRIOR_CHANNEL",
+                        _frame_type_name(f.v1.type),
                     )
         except Exception:
             logger.exception("Error waiting for SAFE_TO_CLOSE_PRIOR_CHANNEL")
