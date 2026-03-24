@@ -13,11 +13,13 @@ from typing import TYPE_CHECKING, cast
 
 import aiofile
 
+from .backend import EncryptedBackend
 from .common import (
     InterfaceInfo,
     Type,
     create_task,
     derive_endpoint_id_from_mac,
+    generate_connection_response,
     generate_paired_key_encryption,
     pick_mac_deterministically,
     safe_assert,
@@ -31,6 +33,7 @@ from .mdns.receive import (
 )
 from .protos import offline_wire_formats, wire_format
 from .results import FileResult, Result, TextResult, WifiResult
+from .ukey2 import do_server_key_exchange
 
 NAME = "pyquickshare"
 
@@ -102,142 +105,170 @@ def _generate_accept() -> wire_format.Frame:
     )
 
 
-async def _receive_loop(  # noqa: C901 PLR0912 PLR0915
-    conn: NearbyConnection,
-    requests: asyncio.Queue[ShareRequest],
-    name: str,
-) -> None:
-    receive_mode: ReceiveMode | None = None
-    expected_payload_ids: dict[
-        int,
-        wire_format.WifiCredentialsMetadata | wire_format.FileMetadata | wire_format.TextMetadata,
-    ] = {}
+class ReceiveConnection(NearbyConnection):
+    async def _exchange_connection_response_server(self) -> None:
+        """Read CONNECTION_RESPONSE, send ours."""
+        data = await self._backend.recv()
+        client_response = offline_wire_formats.OfflineFrame().parse(data)
+        os_name = offline_wire_formats.OsInfoOsType(
+            client_response.v1.connection_response.os_info.type,
+        ).name
+        logger.debug("Client OS: %s", os_name)
+        connection_response = generate_connection_response()
+        await self._backend.send(bytes(connection_response))
 
-    request: ShareRequest | None = None
-    results: list[Result] = []
+    async def upgrade_server(self) -> bool:
+        keychain = await do_server_key_exchange(self._backend)
+        if keychain is None:
+            return False
+        await self._exchange_connection_response_server()
+        self._backend = EncryptedBackend(
+            self._backend.reader,
+            self._backend.writer,
+            keychain,
+        )
+        return True
 
-    async for payload_header, data in conn.iter_payloads():
-        if payload_header.id in expected_payload_ids:
-            metadata = expected_payload_ids.pop(payload_header.id)
+    async def receive_loop(  # noqa: C901 PLR0912 PLR0915
+        self,
+        requests: asyncio.Queue[ShareRequest],
+        name: str,
+    ) -> None:
+        receive_mode: ReceiveMode | None = None
+        expected_payload_ids: dict[
+            int,
+            wire_format.WifiCredentialsMetadata
+            | wire_format.FileMetadata
+            | wire_format.TextMetadata,
+        ] = {}
 
-            if receive_mode is ReceiveMode.FILES:
-                metadata = cast(wire_format.FileMetadata, metadata)
+        request: ShareRequest | None = None
+        results: list[Result] = []
 
-                logger.debug(
-                    "Received full file, saving to downloads/%s",
-                    payload_header.file_name,
-                )
-                async with aiofile.async_open(f"downloads/{payload_header.file_name}", "wb") as f:
-                    await f.write(data)
+        async for payload_header, data in self.iter_payloads():
+            if payload_header.id in expected_payload_ids:
+                metadata = expected_payload_ids.pop(payload_header.id)
 
-                results.append(
-                    FileResult(
-                        name=payload_header.file_name,
-                        path=f"downloads/{payload_header.file_name}",
-                        size=payload_header.total_size,
-                    ),
-                )
-            elif receive_mode is ReceiveMode.WIFI:
-                metadata = cast(wire_format.WifiCredentialsMetadata, metadata)
+                if receive_mode is ReceiveMode.FILES:
+                    metadata = cast(wire_format.FileMetadata, metadata)
 
-                credentials = wire_format.WifiCredentials().parse(data)
-
-                logger.debug(
-                    "Received wifi credentials payload for ssid %r",
-                    metadata.ssid,
-                )
-
-                results.append(
-                    WifiResult(
-                        ssid=metadata.ssid,
-                        password=credentials.password,
-                        security_type=metadata.security_type,
-                    ),
-                )
-            elif receive_mode is ReceiveMode.TEXT:
-                metadata = cast(wire_format.TextMetadata, metadata)
-
-                logger.debug("Received text %d", payload_header.id)
-
-                results.append(
-                    TextResult(
-                        title=metadata.text_title,
-                        text=data.decode("utf-8"),
-                    ),
-                )
-
-        else:
-            wire_frame = wire_format.Frame().parse(data)
-
-            if wire_frame.v1.type == wire_format.V1FrameFrameType.PAIRED_KEY_RESULT:
-                # we know we failed this, and we just mirror the response
-                await conn.send_frame(wire_frame)
-            elif wire_frame.v1.type == wire_format.V1FrameFrameType.PAIRED_KEY_ENCRYPTION:
-                # we don't really care about this
-                ...
-            elif wire_frame.v1.type == wire_format.V1FrameFrameType.INTRODUCTION:
-                if wire_frame.v1.introduction.wifi_credentials_metadata:
-                    receive_mode = ReceiveMode.WIFI
-                    request = ShareRequest(payload_header, to_pin(conn.auth_string))
-                    await requests.put(request)
                     logger.debug(
-                        "Receiving wifi credentials for ssids %r",
-                        ", ".join(
-                            m.ssid for m in wire_frame.v1.introduction.wifi_credentials_metadata
+                        "Received full file, saving to downloads/%s",
+                        payload_header.file_name,
+                    )
+                    async with aiofile.async_open(
+                        f"downloads/{payload_header.file_name}", "wb"
+                    ) as f:
+                        await f.write(data)
+
+                    results.append(
+                        FileResult(
+                            name=payload_header.file_name,
+                            path=f"downloads/{payload_header.file_name}",
+                            size=payload_header.total_size,
+                        ),
+                    )
+                elif receive_mode is ReceiveMode.WIFI:
+                    metadata = cast(wire_format.WifiCredentialsMetadata, metadata)
+
+                    credentials = wire_format.WifiCredentials().parse(data)
+
+                    logger.debug(
+                        "Received wifi credentials payload for ssid %r",
+                        metadata.ssid,
+                    )
+
+                    results.append(
+                        WifiResult(
+                            ssid=metadata.ssid,
+                            password=credentials.password,
+                            security_type=metadata.security_type,
+                        ),
+                    )
+                elif receive_mode is ReceiveMode.TEXT:
+                    metadata = cast(wire_format.TextMetadata, metadata)
+
+                    logger.debug("Received text %d", payload_header.id)
+
+                    results.append(
+                        TextResult(
+                            title=metadata.text_title,
+                            text=data.decode("utf-8"),
                         ),
                     )
 
-                    expected_payload_ids.update(
-                        {
-                            m.payload_id: m
-                            for m in wire_frame.v1.introduction.wifi_credentials_metadata
-                        },
-                    )
-
-                    await conn.send_frame(_generate_accept())
-
-                elif wire_frame.v1.introduction.file_metadata:
-                    logger.debug(
-                        "%r wants to send %r",
-                        name,
-                        ", ".join(m.name for m in wire_frame.v1.introduction.file_metadata),
-                    )
-
-                    receive_mode = ReceiveMode.FILES
-                    request = ShareRequest(payload_header, to_pin(conn.auth_string))
-                    await requests.put(request)
-                    result = await request.respond
-
-                    if result:
-                        logger.debug("Accepting introduction")
-                        await conn.send_frame(_generate_accept())
-                        expected_payload_ids.update(
-                            {m.payload_id: m for m in wire_frame.v1.introduction.file_metadata},
-                        )
-                    else:
-                        logger.debug("Rejecting introduction")
-                        # TODO: send a rejection
-
-                elif wire_frame.v1.introduction.text_metadata:
-                    receive_mode = ReceiveMode.TEXT
-                    request = ShareRequest(payload_header, to_pin(conn.auth_string))
-                    await requests.put(request)
-                    logger.debug("Receiving text")
-                    expected_payload_ids.update(
-                        {m.payload_id: m for m in wire_frame.v1.introduction.text_metadata},
-                    )
-
-                    await conn.send_frame(_generate_accept())
-                else:
-                    logger.debug("Received weird introduction %d", payload_header.id)
             else:
-                logger.debug("Received unknown frame %d", payload_header.id)
+                wire_frame = wire_format.Frame().parse(data)
 
-        if not expected_payload_ids and receive_mode is not None:
-            break
+                if wire_frame.v1.type == wire_format.V1FrameFrameType.PAIRED_KEY_RESULT:
+                    # we know we failed this, and we just mirror the response
+                    await self.send_frame(wire_frame)
+                elif wire_frame.v1.type == wire_format.V1FrameFrameType.PAIRED_KEY_ENCRYPTION:
+                    # we don't really care about this
+                    ...
+                elif wire_frame.v1.type == wire_format.V1FrameFrameType.INTRODUCTION:
+                    if wire_frame.v1.introduction.wifi_credentials_metadata:
+                        receive_mode = ReceiveMode.WIFI
+                        request = ShareRequest(payload_header, to_pin(self.auth_string))
+                        await requests.put(request)
+                        logger.debug(
+                            "Receiving wifi credentials for ssids %r",
+                            ", ".join(
+                                m.ssid for m in wire_frame.v1.introduction.wifi_credentials_metadata
+                            ),
+                        )
 
-    if request:
-        request.done.set_result(results)
+                        expected_payload_ids.update(
+                            {
+                                m.payload_id: m
+                                for m in wire_frame.v1.introduction.wifi_credentials_metadata
+                            },
+                        )
+
+                        await self.send_frame(_generate_accept())
+
+                    elif wire_frame.v1.introduction.file_metadata:
+                        logger.debug(
+                            "%r wants to send %r",
+                            name,
+                            ", ".join(m.name for m in wire_frame.v1.introduction.file_metadata),
+                        )
+
+                        receive_mode = ReceiveMode.FILES
+                        request = ShareRequest(payload_header, to_pin(self.auth_string))
+                        await requests.put(request)
+                        result = await request.respond
+
+                        if result:
+                            logger.debug("Accepting introduction")
+                            await self.send_frame(_generate_accept())
+                            expected_payload_ids.update(
+                                {m.payload_id: m for m in wire_frame.v1.introduction.file_metadata},
+                            )
+                        else:
+                            logger.debug("Rejecting introduction")
+                            # TODO: send a rejection
+
+                    elif wire_frame.v1.introduction.text_metadata:
+                        receive_mode = ReceiveMode.TEXT
+                        request = ShareRequest(payload_header, to_pin(self.auth_string))
+                        await requests.put(request)
+                        logger.debug("Receiving text")
+                        expected_payload_ids.update(
+                            {m.payload_id: m for m in wire_frame.v1.introduction.text_metadata},
+                        )
+
+                        await self.send_frame(_generate_accept())
+                    else:
+                        logger.debug("Received weird introduction %d", payload_header.id)
+                else:
+                    logger.debug("Received unknown frame %d", payload_header.id)
+
+            if not expected_payload_ids and receive_mode is not None:
+                break
+
+        if request:
+            request.done.set_result(results)
 
 
 async def _handle_client(
@@ -251,7 +282,7 @@ async def _handle_client(
     ip, port = writer.get_extra_info("peername")
     logger.debug("Connection from %s:%d", ip, port)
 
-    conn = NearbyConnection(reader, writer, endpoint_id=endpoint_id)
+    conn = ReceiveConnection(reader, writer, endpoint_id=endpoint_id)
 
     data = await conn.recv_bytes()
     connection_request = offline_wire_formats.OfflineFrame().parse(data)
@@ -273,7 +304,7 @@ async def _handle_client(
     conn.start_keep_alive()
     await conn.send_frame(generate_paired_key_encryption())
 
-    await _receive_loop(conn, requests, name)
+    await conn.receive_loop(requests, name)
 
     duration = time.perf_counter() - start
     logger.debug("Connection with %r closed after %f seconds", name, duration)

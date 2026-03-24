@@ -11,12 +11,9 @@ from .backend import ConnectionBackend, EncryptedBackend, UnencryptedBackend
 from .common import (
     SILLY,
     create_task,
-    generate_connection_response,
     payloadify,
 )
-from .dbus.p2p import connect_p2p_group
 from .protos import offline_wire_formats, wire_format
-from .ukey2 import do_client_key_exchange, do_server_key_exchange
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -24,8 +21,6 @@ if TYPE_CHECKING:
 logger = getLogger(__name__)
 
 _PayloadHeader = offline_wire_formats.PayloadTransferFramePayloadHeader
-_UpgradeMedium = offline_wire_formats.BandwidthUpgradeNegotiationFrameUpgradePathInfoMedium
-
 
 def _frame_type_name(frame_type: int) -> str:
     try:
@@ -45,25 +40,6 @@ def _bw_event_name(event_type: int) -> str:
         return name if name is not None else f"UNKNOWN({event_type})"
 
 
-async def _exchange_connection_response_client(backend: ConnectionBackend) -> None:
-    """Send our CONNECTION_RESPONSE and consume the peer's."""
-    connection_response = generate_connection_response()
-    await backend.send(bytes(connection_response))
-    await backend.recv()  # consume the peer's CONNECTION_RESPONSE
-
-
-async def _exchange_connection_response_server(backend: ConnectionBackend) -> None:
-    """Read CONNECTION_RESPONSE, send ours."""
-    data = await backend.recv()
-    client_response = offline_wire_formats.OfflineFrame().parse(data)
-    os_name = offline_wire_formats.OsInfoOsType(
-        client_response.v1.connection_response.os_info.type,
-    ).name
-    logger.debug("Client OS: %s", os_name)
-    connection_response = generate_connection_response()
-    await backend.send(bytes(connection_response))
-
-
 class NearbyConnection:
     def __init__(
         self,
@@ -76,46 +52,23 @@ class NearbyConnection:
         self._keep_alive_task: asyncio.Task[None] | None = None
         self._endpoint_id: bytes = endpoint_id
 
-        # Upgrade gate: set = sends allowed, clear = upgrade in progress.
-        self._upgrade_gate = asyncio.Event()
-        self._upgrade_gate.set()
+        self._v1_registry: dict[
+            int, Callable[[offline_wire_formats.OfflineFrame], Awaitable[None]]
+        ] = {}
 
-        # Idle tracker: set = no active sends, clear = at least one in flight.
-        self._sends_idle = asyncio.Event()
-        self._sends_idle.set()
-        self._active_sends = 0
-
-        # Holds a callable to destroy the P2P group if we do a WiFi Direct upgrade
-        self._p2p_destroy: Callable[[], Awaitable[None]] | None = None
+        self.register_v1_handler(
+            offline_wire_formats.V1FrameFrameType.DISCONNECTION,
+            self._handle_disconnection,
+        )
+        self.register_v1_handler(
+            offline_wire_formats.V1FrameFrameType.KEEP_ALIVE,
+            self._handle_keep_alive,
+        )
 
     @property
     def auth_string(self) -> bytes:
         assert isinstance(self._backend, EncryptedBackend)  # noqa: S101
         return self._backend.auth_string
-
-    async def upgrade_client(self) -> bool:
-        keychain = await do_client_key_exchange(self._backend)
-        if keychain is None:
-            return False
-        await _exchange_connection_response_client(self._backend)
-        self._backend = EncryptedBackend(
-            self._backend.reader,
-            self._backend.writer,
-            keychain,
-        )
-        return True
-
-    async def upgrade_server(self) -> bool:
-        keychain = await do_server_key_exchange(self._backend)
-        if keychain is None:
-            return False
-        await _exchange_connection_response_server(self._backend)
-        self._backend = EncryptedBackend(
-            self._backend.reader,
-            self._backend.writer,
-            keychain,
-        )
-        return True
 
     async def send_bytes(self, data: bytes) -> None:
         await self._backend.send(data)
@@ -196,26 +149,31 @@ class NearbyConnection:
         flags: int = 0,
     ) -> None:
         """Send one chunk of a file payload."""
-        await self._upgrade_gate.wait()
-        self._active_sends += 1
-        self._sends_idle.clear()
+        await self._send_payload_frame(
+            chunk,
+            id=id,
+            flags=flags,
+            payload_type=offline_wire_formats.PayloadTransferFramePayloadHeaderPayloadType.FILE,
+            file_name=file_name,
+            offset=offset,
+            total_size=total_size,
+        )
 
-        try:
-            await self._send_payload_frame(
-                chunk,
-                id=id,
-                flags=flags,
-                payload_type=offline_wire_formats.PayloadTransferFramePayloadHeaderPayloadType.FILE,
-                file_name=file_name,
-                offset=offset,
-                total_size=total_size,
-            )
-        finally:
-            self._active_sends -= 1
-            if self._active_sends == 0:
-                self._sends_idle.set()
+    async def _handle_disconnection(self, _frame: offline_wire_formats.OfflineFrame) -> None:
+        logger.debug("Received DISCONNECTION frame, closing connection")
+        await self.close()
 
-    async def iter_payloads(  # noqa: C901
+    async def _handle_keep_alive(self, _frame: offline_wire_formats.OfflineFrame) -> None:
+        logger.debug("Received KEEP_ALIVE frame, ignoring")
+
+    def register_v1_handler(
+        self,
+        frame_type: offline_wire_formats.V1FrameFrameType,
+        handler: Callable[[offline_wire_formats.OfflineFrame], Awaitable[None]],
+    ) -> None:
+        self._v1_registry[frame_type] = handler
+
+    async def iter_payloads(
         self,
     ) -> AsyncIterator[tuple[_PayloadHeader, bytes]]:
         """Yield complete (PayloadHeader, bytes) payloads."""
@@ -232,16 +190,9 @@ class NearbyConnection:
             frame_type = frame.v1.type
             logger.log(SILLY, "Received transport frame type=%s", _frame_type_name(frame_type))
 
-            if frame_type == offline_wire_formats.V1FrameFrameType.DISCONNECTION:
-                logger.debug("Received DISCONNECTION")
-                break
-
-            if frame_type == offline_wire_formats.V1FrameFrameType.KEEP_ALIVE:
-                logger.debug("Received KEEP_ALIVE")
-                continue
-
-            if frame_type == offline_wire_formats.V1FrameFrameType.BANDWIDTH_UPGRADE_NEGOTIATION:
-                await self._handle_bandwidth_upgrade(frame.v1.bandwidth_upgrade_negotiation)
+            if frame_type in self._v1_registry:
+                handler = self._v1_registry[frame_type]
+                await handler(frame)
                 continue
 
             if frame_type != offline_wire_formats.V1FrameFrameType.PAYLOAD_TRANSFER:
@@ -304,113 +255,6 @@ class NearbyConnection:
         while True:
             await self._send_transport_frame(frame)
             await asyncio.sleep(10)
-
-    async def _resolve_upgrade_endpoint(
-        self,
-        path: offline_wire_formats.BandwidthUpgradeNegotiationFrameUpgradePathInfo,
-    ) -> tuple[str, int] | None:
-        """Return (ip, port) for the upgrade medium, or None to abort."""
-        medium = path.medium
-        if medium == _UpgradeMedium.WIFI_DIRECT:
-            creds = path.wifi_direct_credentials
-            ip = creds.gateway
-            port = creds.port
-            logger.debug(
-                "WiFi Direct upgrade to %s:%d (SSID=%r freq=%d)",
-                ip,
-                port,
-                creds.ssid,
-                creds.frequency,
-            )
-            try:
-                start_time = asyncio.get_event_loop().time()
-                destroy = await connect_p2p_group(
-                    creds.ssid, creds.password, creds.frequency, creds.gateway
-                )
-                elapsed = asyncio.get_event_loop().time() - start_time
-                logger.debug("Connecting to P2P group took %.2f seconds", elapsed)
-            except Exception:
-                logger.exception("Failed to join P2P group %r", creds.ssid)
-                return None
-            self._p2p_destroy = destroy
-            return ip, port
-
-        logger.warning("Unsupported upgrade medium %d, ignoring", medium)
-        return None
-
-    async def _handle_bandwidth_upgrade(
-        self,
-        upgrade_frame: offline_wire_formats.BandwidthUpgradeNegotiationFrame,
-    ) -> None:
-        logger.debug(
-            "Received BANDWIDTH_UPGRADE_NEGOTIATION event=%s",
-            _bw_event_name(upgrade_frame.event_type),
-        )
-
-        if upgrade_frame.event_type != (
-            offline_wire_formats.BandwidthUpgradeNegotiationFrameEventType.UPGRADE_PATH_AVAILABLE
-        ):
-            return
-
-        result = await self._resolve_upgrade_endpoint(upgrade_frame.upgrade_path_info)
-        if result is None:
-            return
-        ip, port = result
-
-        # Pause outgoing file sends and wait for any in-flight chunk to finish.
-        self._upgrade_gate.clear()
-        await self._sends_idle.wait()
-
-        # Connect to the new transport endpoint.
-        try:
-            new_reader, new_writer = await asyncio.open_connection(ip, port)
-        except Exception:
-            logger.exception("Failed to connect to upgraded endpoint %s:%d", ip, port)
-            self._upgrade_gate.set()
-            return
-
-        new_channel = UnencryptedBackend(new_reader, new_writer)
-
-        # CLIENT_INTRODUCTION on new channel
-        intro = offline_wire_formats.OfflineFrame(
-            version=offline_wire_formats.OfflineFrameVersion.V1,
-            v1=offline_wire_formats.V1Frame(
-                type=offline_wire_formats.V1FrameFrameType.BANDWIDTH_UPGRADE_NEGOTIATION,
-                bandwidth_upgrade_negotiation=offline_wire_formats.BandwidthUpgradeNegotiationFrame(
-                    event_type=offline_wire_formats.BandwidthUpgradeNegotiationFrameEventType.CLIENT_INTRODUCTION,
-                    client_introduction=offline_wire_formats.BandwidthUpgradeNegotiationFrameClientIntroduction(
-                        endpoint_id=self._endpoint_id.decode("ascii") if self._endpoint_id else "",
-                        supports_disabling_encryption=False,
-                    ),
-                ),
-            ),
-        )
-        await new_channel.send(bytes(intro))
-
-        if upgrade_frame.upgrade_path_info.supports_client_introduction_ack:
-            try:
-                raw = await new_channel.recv()
-                ack = offline_wire_formats.OfflineFrame().parse(raw)
-                if ack.v1.bandwidth_upgrade_negotiation.event_type != (
-                    offline_wire_formats.BandwidthUpgradeNegotiationFrameEventType.CLIENT_INTRODUCTION_ACK
-                ):
-                    logger.warning(
-                        "Expected CLIENT_INTRODUCTION_ACK, got event=%s",
-                        _bw_event_name(ack.v1.bandwidth_upgrade_negotiation.event_type),
-                    )
-            except Exception:
-                logger.exception("Failed to receive CLIENT_INTRODUCTION_ACK")
-                new_writer.close()
-                self._upgrade_gate.set()
-                return
-
-        await self._finalize_old_channel()
-
-        # Swap to the encrypted backend on the new channel, reusing existing keys.
-        assert isinstance(self._backend, EncryptedBackend)  # noqa: S101
-        self._backend.replace(new_reader, new_writer)
-        logger.debug("Switched to upgraded transport channel %s:%d", ip, port)
-        self._upgrade_gate.set()  # resume sends, now transparently routed through new backend
 
     async def _finalize_old_channel(self) -> None:
         # 1. send LAST_WRITE_TO_PRIOR_CHANNEL
@@ -524,8 +368,3 @@ class NearbyConnection:
         self._backend.writer.close()
         with contextlib.suppress(Exception):
             await self._backend.writer.wait_closed()
-
-        if self._p2p_destroy is not None:
-            with contextlib.suppress(Exception):
-                await self._p2p_destroy()
-            self._p2p_destroy = None

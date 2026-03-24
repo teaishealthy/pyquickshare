@@ -16,7 +16,7 @@ async def send(file: str) -> None:
 
     async for device in quickshare:
         if device.connectable:
-            return await pyquickshare.send_to(device, file=file)
+            return await device.send(file=file)
 
     return None
 
